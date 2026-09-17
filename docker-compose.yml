@@ -1,0 +1,11 @@
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: dynamodb-local
+    # -inMemory keeps data in RAM only (no SQLite file), which avoids the
+    # "SQLiteQueue ... stopped abnormally" corruption/hang that a persisted
+    # volume can cause on Windows. Data is lost when the container restarts.
+    command: "-jar DynamoDBLocal.jar -sharedDb -inMemory"
+    ports:
+      - "8000:8000"
+

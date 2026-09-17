@@ -1,0 +1,51 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.example'
+version = '0.0.1-SNAPSHOT'
+description = 'AWS Cloud Native Order Platform - Spring Boot + REST API + DynamoDB'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    awsSdkVersion = '2.30.25'
+    springdocVersion = '2.6.0'
+}
+
+dependencies {
+    // Spring Boot Web (REST API)
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    // OpenAPI / Swagger UI (springdoc)
+    implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${springdocVersion}"
+
+    // AWS SDK v2 for DynamoDB
+    implementation "software.amazon.awssdk:dynamodb:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:dynamodb-enhanced:${awsSdkVersion}"
+
+    // Test
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Testcontainers (core + JUnit 5 integration). DynamoDB Local is launched
+    // via GenericContainer, since the dedicated dynamodb module was removed.
+    testImplementation 'org.testcontainers:testcontainers:1.20.4'
+    testImplementation 'org.testcontainers:junit-jupiter:1.20.4'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}

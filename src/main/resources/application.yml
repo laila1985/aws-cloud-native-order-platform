@@ -1,0 +1,14 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: order-platform
+
+aws:
+  region: us-east-1
+  dynamodb:
+    endpoint: http://localhost:8000
+    tableName: Orders
+  accessKeyId: local
+  secretAccessKey: local
