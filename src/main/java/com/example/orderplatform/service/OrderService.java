@@ -4,6 +4,9 @@ import com.example.orderplatform.event.OrderCreatedEvent;
 import com.example.orderplatform.messaging.OrderEventPublisher;
 import com.example.orderplatform.model.Order;
 import com.example.orderplatform.repository.OrderRepository;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.CachePut;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -13,9 +16,15 @@ import java.util.UUID;
 
 /**
  * Business logic for orders.
+ * <p>
+ * {@link #findById(String)} uses the cache-aside pattern (Redis in front of
+ * DynamoDB); mutations keep the cache consistent via {@code @CachePut} /
+ * {@code @CacheEvict}.
  */
 @Service
 public class OrderService {
+
+    public static final String ORDERS_CACHE = "orders";
 
     private final OrderRepository orderRepository;
     private final OrderEventPublisher orderEventPublisher;
@@ -49,6 +58,11 @@ public class OrderService {
         return order;
     }
 
+    /**
+     * Cache-aside read: check Redis first; on a miss, load from DynamoDB and
+     * populate the cache for subsequent lookups.
+     */
+    @Cacheable(cacheNames = ORDERS_CACHE, key = "#orderId")
     public Order findById(String orderId) {
         return orderRepository.findById(orderId)
                 .orElseThrow(() -> new OrderNotFoundException(orderId));
@@ -58,6 +72,7 @@ public class OrderService {
         return orderRepository.findAll();
     }
 
+    @CachePut(cacheNames = ORDERS_CACHE, key = "#orderId")
     public Order update(String orderId, Order updated) {
         Order existing = findById(orderId);
         existing.setStatus(updated.getStatus() != null ? updated.getStatus() : existing.getStatus());
@@ -70,6 +85,21 @@ public class OrderService {
         return existing;
     }
 
+    /**
+     * Updates only the status of an order and refreshes its cache entry. Used by
+     * the async consumers (OrderProcessor / Lambda handler) so a status change is
+     * immediately visible through the cache.
+     */
+    @CachePut(cacheNames = ORDERS_CACHE, key = "#orderId")
+    public Order updateStatus(String orderId, String status) {
+        Order existing = orderRepository.findById(orderId)
+                .orElseThrow(() -> new OrderNotFoundException(orderId));
+        existing.setStatus(status);
+        orderRepository.save(existing);
+        return existing;
+    }
+
+    @CacheEvict(cacheNames = ORDERS_CACHE, key = "#orderId")
     public void delete(String orderId) {
         findById(orderId);
         orderRepository.delete(orderId);

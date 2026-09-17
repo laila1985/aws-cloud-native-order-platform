@@ -20,6 +20,12 @@ services:
     volumes:
       - localstack-data:/var/lib/localstack
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+
 volumes:
   localstack-data:
 

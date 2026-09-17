@@ -466,6 +466,98 @@ Accounts (IRSA)**. The template includes a commented-out
 `sts:AssumeRoleWithWebIdentity` trust statement — fill in your cluster's OIDC
 provider ARN and uncomment it.
 
+---
+
+## 15. Step 5 — Redis caching (cache-aside)
+
+To make reads fast and offload DynamoDB, `GET /orders/{id}` now uses **Redis**
+(ElastiCache in AWS) as a cache using the **cache-aside** pattern:
+
+```
+GET /orders/{id}
+        │
+        ▼
+      Redis
+        │
+   cache hit? ── yes ──► return cached order
+        │
+        no
+        ▼
+    DynamoDB   (load order)
+        │
+        ▼
+      Redis   (store order, TTL 5 minutes)
+        │
+        ▼
+      return
+```
+
+### The concept, explained simply
+
+- **Redis** is a fast, in-memory **key-value store**. Reads are much quicker
+  than a database because nothing touches disk.
+- **Cache-aside** means the application manages the cache explicitly: it checks
+  Redis first; only on a **miss** does it go to DynamoDB and then store the
+  result in Redis for next time.
+- **ElastiCache** is AWS's managed Redis — the same code works locally against a
+  plain Redis container and in AWS against ElastiCache by just changing the
+  endpoint.
+
+### How it's implemented
+
+Spring's **cache abstraction** (`@Cacheable`, `@CachePut`, `@CacheEvict`) with a
+Redis-backed `CacheManager`:
+
+| Annotation | Where | Effect |
+|------------|-------|--------|
+| `@Cacheable("orders", key = "#orderId")` | `OrderService.findById` | Check Redis; on miss load from DynamoDB and store |
+| `@CachePut("orders", key = "#orderId")` | `update` / `updateStatus` | Update the cache after a write |
+| `@CacheEvict("orders", key = "#orderId")` | `delete` | Remove the entry after deletion |
+
+The async consumers (`OrderProcessor`, `OrderLambdaHandler`) now go through
+`OrderService.updateStatus(...)`, so a status change (`PROCESSED` / `NOTIFIED`)
+is written back to the cache immediately instead of leaving a stale entry.
+
+**Serialization**: order objects are stored as JSON in Redis. The configured
+Jackson serializer knows about `java.time.Instant` (the `createdAt` field) and
+`BigDecimal` (the `totalAmount` field), so values round-trip correctly.
+
+**Eviction**: entries carry a **time-to-live** (default 5 minutes,
+`spring.cache.redis.time-to-live`), so a crashed cache can never serve
+indefinitely stale data.
+
+### Configuration
+
+`src/main/resources/application.yml`:
+
+```yaml
+spring:
+  cache:
+    type: redis
+    redis:
+      time-to-live: PT5M
+  data:
+    redis:
+      host: localhost   # ElastiCache endpoint in AWS
+      port: 6379
+```
+
+`docker-compose.yml` adds a local Redis service:
+
+```yaml
+redis:
+  image: redis:7-alpine
+  ports:
+    - "6379:6379"
+```
+
+### In AWS
+
+Swap the local Redis for **ElastiCache for Redis**: point
+`spring.data.redis.host` at the cluster's endpoint and add an IAM policy (or
+Redis auth) for access. No code changes are required.
+
+
 
 
 

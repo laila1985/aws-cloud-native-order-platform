@@ -50,6 +50,11 @@ on startup.
 Security is defined as infrastructure-as-code (CloudFormation) — IAM roles,
 Secrets Manager, and KMS. See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) §14.
 
+## Redis caching (Step 5)
+
+`GET /orders/{id}` is cached in **Redis** (ElastiCache in AWS) using the
+cache-aside pattern. See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) §15.
+
 ## Documentation
 
 - **Beginner's guide & technical spec**: [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)
@@ -60,12 +65,13 @@ Secrets Manager, and KMS. See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) �
 - Spring Boot 3.3.x
 - AWS SDK v2 (DynamoDB Enhanced Client)
 - DynamoDB Local (via Docker) for development
+- Redis (cache-aside for reads; ElastiCache in AWS)
 
 ## Prerequisites
 
 - JDK 21
 - Gradle (or use the included wrapper)
-- Docker (for local DynamoDB)
+- Docker (for local DynamoDB, LocalStack, and Redis)
 
 ## Run locally
 

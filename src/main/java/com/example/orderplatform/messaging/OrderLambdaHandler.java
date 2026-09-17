@@ -3,7 +3,8 @@ package com.example.orderplatform.messaging;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.orderplatform.event.OrderCreatedEvent;
-import com.example.orderplatform.repository.OrderRepository;
+import com.example.orderplatform.service.OrderNotFoundException;
+import com.example.orderplatform.service.OrderService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -21,7 +22,8 @@ import java.util.List;
  * In AWS this branch is implemented as a Lambda (e.g. {@code order-notifier})
  * triggered by SNS; locally we emulate it as a second SQS queue
  * ({@code order-lambda-queue}) consumed by this handler. On receipt it marks the
- * order as {@code NOTIFIED}, simulating the Lambda's side effect.
+ * order as {@code NOTIFIED} (via the cache-aware {@link OrderService#updateStatus}),
+ * simulating the Lambda's side effect.
  * <p>
  * To replace this with a real Lambda, deploy the handler as a Lambda function
  * and add an SNS subscription with {@code protocol = "lambda"} — the SQS queue
@@ -34,16 +36,16 @@ public class OrderLambdaHandler {
 
     private final SqsClient sqsClient;
     private final ObjectMapper objectMapper;
-    private final OrderRepository orderRepository;
+    private final OrderService orderService;
     private final MessagingResources messagingResources;
 
     public OrderLambdaHandler(SqsClient sqsClient,
                               ObjectMapper objectMapper,
-                              OrderRepository orderRepository,
+                              OrderService orderService,
                               MessagingResources messagingResources) {
         this.sqsClient = sqsClient;
         this.objectMapper = objectMapper;
-        this.orderRepository = orderRepository;
+        this.orderService = orderService;
         this.messagingResources = messagingResources;
     }
 
@@ -67,11 +69,12 @@ public class OrderLambdaHandler {
     private void process(Message message, String queueUrl) {
         try {
             OrderCreatedEvent event = parseEvent(message.body());
-            orderRepository.findById(event.orderId()).ifPresent(order -> {
-                order.setStatus("NOTIFIED");
-                orderRepository.save(order);
+            try {
+                orderService.updateStatus(event.orderId(), "NOTIFIED");
                 log.info("[lambda-sim] Order {} marked NOTIFIED", event.orderId());
-            });
+            } catch (OrderNotFoundException e) {
+                log.warn("[lambda-sim] Order {} not found; skipping NOTIFIED update", event.orderId());
+            }
         } catch (Exception e) {
             log.error("[lambda-sim] Failed to process message {}", message.messageId(), e);
         } finally {

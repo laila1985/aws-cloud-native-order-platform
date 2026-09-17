@@ -3,8 +3,8 @@ package com.example.orderplatform.messaging;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.orderplatform.event.OrderCreatedEvent;
-import com.example.orderplatform.model.Order;
-import com.example.orderplatform.repository.OrderRepository;
+import com.example.orderplatform.service.OrderNotFoundException;
+import com.example.orderplatform.service.OrderService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -19,7 +19,7 @@ import java.util.List;
 /**
  * SQS consumer that processes {@link OrderCreatedEvent}s from the
  * "order-processor-queue". On receipt it marks the corresponding order as
- * {@code PROCESSED} in DynamoDB.
+ * {@code PROCESSED} (via the cache-aware {@link OrderService#updateStatus}).
  * <p>
  * This is the {@code SQS → Order Processor} branch of the messaging flow.
  */
@@ -30,16 +30,16 @@ public class OrderProcessor {
 
     private final SqsClient sqsClient;
     private final ObjectMapper objectMapper;
-    private final OrderRepository orderRepository;
+    private final OrderService orderService;
     private final MessagingResources messagingResources;
 
     public OrderProcessor(SqsClient sqsClient,
                           ObjectMapper objectMapper,
-                          OrderRepository orderRepository,
+                          OrderService orderService,
                           MessagingResources messagingResources) {
         this.sqsClient = sqsClient;
         this.objectMapper = objectMapper;
-        this.orderRepository = orderRepository;
+        this.orderService = orderService;
         this.messagingResources = messagingResources;
     }
 
@@ -63,11 +63,12 @@ public class OrderProcessor {
     private void process(Message message, String queueUrl) {
         try {
             OrderCreatedEvent event = parseEvent(message.body());
-            orderRepository.findById(event.orderId()).ifPresent(order -> {
-                order.setStatus("PROCESSED");
-                orderRepository.save(order);
+            try {
+                orderService.updateStatus(event.orderId(), "PROCESSED");
                 log.info("Order {} marked PROCESSED", event.orderId());
-            });
+            } catch (OrderNotFoundException e) {
+                log.warn("Order {} not found; skipping PROCESSED update", event.orderId());
+            }
         } catch (Exception e) {
             log.error("Failed to process message {}", message.messageId(), e);
         } finally {

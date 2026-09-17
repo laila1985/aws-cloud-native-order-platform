@@ -38,6 +38,10 @@ dependencies {
     implementation "software.amazon.awssdk:sns:${awsSdkVersion}"
     implementation "software.amazon.awssdk:sqs:${awsSdkVersion}"
 
+    // Redis caching (cache-aside for GET /orders/{id})
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'org.springframework.boot:spring-boot-starter-cache'
+
     // Test
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // Testcontainers (core + JUnit 5 integration). DynamoDB Local is launched

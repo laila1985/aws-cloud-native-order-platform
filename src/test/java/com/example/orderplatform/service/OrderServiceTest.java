@@ -171,6 +171,29 @@ class OrderServiceTest {
     }
 
     @Test
+    @DisplayName("updateStatus() changes the status and persists the order")
+    void updateStatus_changesStatusAndPersists() {
+        Order existing = new Order();
+        existing.setOrderId("id-1");
+        existing.setStatus("CREATED");
+        when(orderRepository.findById("id-1")).thenReturn(Optional.of(existing));
+
+        Order result = orderService.updateStatus("id-1", "PROCESSED");
+
+        assertThat(result.getStatus()).isEqualTo("PROCESSED");
+        verify(orderRepository).save(existing);
+    }
+
+    @Test
+    @DisplayName("updateStatus() throws when order is missing")
+    void updateStatus_throwsWhenMissing() {
+        when(orderRepository.findById("missing")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> orderService.updateStatus("missing", "PROCESSED"))
+                .isInstanceOf(OrderNotFoundException.class);
+    }
+
+    @Test
     @DisplayName("delete() removes an existing order")
     void delete_removesExistingOrder() {
         Order existing = new Order();

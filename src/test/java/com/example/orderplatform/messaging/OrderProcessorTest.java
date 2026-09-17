@@ -1,8 +1,7 @@
 package com.example.orderplatform.messaging;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.example.orderplatform.model.Order;
-import com.example.orderplatform.repository.OrderRepository;
+import com.example.orderplatform.service.OrderService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -15,9 +14,6 @@ import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
-
-import java.util.List;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -34,7 +30,7 @@ class OrderProcessorTest {
     private SqsClient sqsClient;
 
     @Mock
-    private OrderRepository orderRepository;
+    private OrderService orderService;
 
     @Mock
     private MessagingResources messagingResources;
@@ -43,7 +39,7 @@ class OrderProcessorTest {
 
     @BeforeEach
     void setUp() {
-        processor = new OrderProcessor(sqsClient, OBJECT_MAPPER, orderRepository, messagingResources);
+        processor = new OrderProcessor(sqsClient, OBJECT_MAPPER, orderService, messagingResources);
     }
 
     @Test
@@ -57,14 +53,9 @@ class OrderProcessorTest {
         when(sqsClient.receiveMessage(any(ReceiveMessageRequest.class)))
                 .thenReturn(ReceiveMessageResponse.builder().messages(message).build());
 
-        Order order = new Order();
-        order.setOrderId("id-1");
-        when(orderRepository.findById("id-1")).thenReturn(Optional.of(order));
-
         processor.poll();
 
-        assertThat(order.getStatus()).isEqualTo("PROCESSED");
-        verify(orderRepository).save(order);
+        verify(orderService).updateStatus("id-1", "PROCESSED");
         ArgumentCaptor<DeleteMessageRequest> deleteCaptor = ArgumentCaptor.forClass(DeleteMessageRequest.class);
         verify(sqsClient).deleteMessage(deleteCaptor.capture());
         assertThat(deleteCaptor.getValue().receiptHandle()).isEqualTo("rh-1");
