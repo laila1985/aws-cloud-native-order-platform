@@ -1,5 +1,6 @@
 package com.example.orderplatform.service;
 
+import com.example.orderplatform.messaging.OrderEventPublisher;
 import com.example.orderplatform.model.Order;
 import com.example.orderplatform.model.OrderItem;
 import com.example.orderplatform.repository.OrderRepository;
@@ -27,11 +28,14 @@ class OrderServiceTest {
     @Mock
     private OrderRepository orderRepository;
 
+    @Mock
+    private OrderEventPublisher orderEventPublisher;
+
     private OrderService orderService;
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderService(orderRepository);
+        orderService = new OrderService(orderRepository, orderEventPublisher);
     }
 
     private OrderItem item(String productId, int quantity, String unitPrice) {
@@ -57,6 +61,7 @@ class OrderServiceTest {
         assertThat(result.getCreatedAt()).isNotNull();
         assertThat(result.getTotalAmount()).isEqualByComparingTo("25.50");
         verify(orderRepository).save(result);
+        verify(orderEventPublisher).publish(any());
     }
 
     @Test

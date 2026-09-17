@@ -12,6 +12,39 @@ REST API
 DynamoDB
 ```
 
+## Asynchronous processing (Step 3)
+
+After an order is created, the API publishes an event that fans out through
+AWS messaging:
+
+```
+                    ┌── SQS ──► Order Processor  (marks order "PROCESSED" in DynamoDB)
+                    │
+Order API ──► SNS ──┤
+   (create)         │
+                    └── Lambda  (marks order "NOTIFIED")
+```
+
+- **SNS topic** (`order-events`) fans out to two subscribers.
+- **SQS queue** (`order-processor-queue`) → the in-app `OrderProcessor`, an
+  `@Scheduled` poller that marks the order `PROCESSED`.
+- **Lambda** — for local development this is emulated as a second SQS queue
+  (`order-lambda-queue`) consumed by `OrderLambdaHandler` (marks the order
+  `NOTIFIED`). In AWS, replace this with a real Lambda subscribed to the topic
+  (`protocol = "lambda"`); the queue + poller then become unnecessary.
+
+Publishing is **best-effort** and non-blocking: it never fails the order
+creation response, and the app still boots even if messaging resources are
+unavailable.
+
+### Local emulation (LocalStack)
+
+`docker-compose.yml` starts **LocalStack** (`sns` + `sqs` services) alongside
+DynamoDB Local. The app points at LocalStack via `aws.sns.endpoint` /
+`aws.sqs.endpoint` (default `http://localhost:4566`), the same pattern used for
+DynamoDB. Resources (topic, queues, subscriptions) are provisioned idempotently
+on startup.
+
 ## Stack
 
 - Java 21

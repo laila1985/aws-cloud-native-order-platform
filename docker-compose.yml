@@ -9,3 +9,17 @@ services:
     ports:
       - "8000:8000"
 
+  localstack:
+    image: localstack/localstack:latest
+    container_name: localstack
+    environment:
+      - SERVICES=sns,sqs
+      - DEBUG=0
+    ports:
+      - "4566:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+
+volumes:
+  localstack-data:
+

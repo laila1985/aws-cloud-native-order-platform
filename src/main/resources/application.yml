@@ -10,5 +10,13 @@ aws:
   dynamodb:
     endpoint: http://localhost:8000
     tableName: Orders
+  sns:
+    endpoint: http://localhost:4566
+    topicName: order-events
+  sqs:
+    endpoint: http://localhost:4566
+    processorQueueName: order-processor-queue
+    lambdaQueueName: order-lambda-queue
+    pollIntervalMs: 5000
   accessKeyId: local
   secretAccessKey: local

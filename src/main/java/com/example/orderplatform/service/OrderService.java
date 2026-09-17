@@ -1,5 +1,7 @@
 package com.example.orderplatform.service;
 
+import com.example.orderplatform.event.OrderCreatedEvent;
+import com.example.orderplatform.messaging.OrderEventPublisher;
 import com.example.orderplatform.model.Order;
 import com.example.orderplatform.repository.OrderRepository;
 import org.springframework.stereotype.Service;
@@ -16,9 +18,11 @@ import java.util.UUID;
 public class OrderService {
 
     private final OrderRepository orderRepository;
+    private final OrderEventPublisher orderEventPublisher;
 
-    public OrderService(OrderRepository orderRepository) {
+    public OrderService(OrderRepository orderRepository, OrderEventPublisher orderEventPublisher) {
         this.orderRepository = orderRepository;
+        this.orderEventPublisher = orderEventPublisher;
     }
 
     public Order create(Order order) {
@@ -33,6 +37,15 @@ public class OrderService {
         }
         order.setTotalAmount(computeTotal(order));
         orderRepository.save(order);
+
+        // Fan-out: publish the creation event to SNS (best-effort, async consumers).
+        orderEventPublisher.publish(new OrderCreatedEvent(
+                order.getOrderId(),
+                order.getCustomerId(),
+                order.getStatus(),
+                order.getTotalAmount(),
+                order.getCreatedAt()));
+
         return order;
     }
 

@@ -34,6 +34,10 @@ dependencies {
     implementation "software.amazon.awssdk:dynamodb:${awsSdkVersion}"
     implementation "software.amazon.awssdk:dynamodb-enhanced:${awsSdkVersion}"
 
+    // AWS SDK v2 for messaging (SNS + SQS)
+    implementation "software.amazon.awssdk:sns:${awsSdkVersion}"
+    implementation "software.amazon.awssdk:sqs:${awsSdkVersion}"
+
     // Test
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // Testcontainers (core + JUnit 5 integration). DynamoDB Local is launched
