@@ -45,6 +45,15 @@ DynamoDB Local. The app points at LocalStack via `aws.sns.endpoint` /
 DynamoDB. Resources (topic, queues, subscriptions) are provisioned idempotently
 on startup.
 
+## Security (Step 4)
+
+Security is defined as infrastructure-as-code (CloudFormation) — IAM roles,
+Secrets Manager, and KMS. See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) §14.
+
+## Documentation
+
+- **Beginner's guide & technical spec**: [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)
+
 ## Stack
 
 - Java 21

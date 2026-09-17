@@ -228,7 +228,7 @@ code is structured so that swap is straightforward.
 
 ## 8. Configuration (application.yml)
 
-Key settings live in `../src/main/resources/application.yml`:
+Key settings live in `src/main/resources/application.yml`:
 
 ```yaml
 server:
@@ -325,6 +325,9 @@ gradlew.bat test --tests "*IntegrationTest"  # integration tests (needs Docker)
 | **Asynchronous** | Work happens in the background, without blocking the main flow |
 | **Container (Docker)** | A lightweight, portable bundle that runs an app/service consistently |
 | **Emulator (LocalStack)** | A local stand-in for a real AWS service during development |
+| **IAM** | AWS's permission system — decides who can do what to which resources |
+| **Least privilege** | Giving each component only the minimum permissions it needs |
+| **KMS** | AWS's key management service for encrypting/decrypting data |
 
 ---
 
@@ -339,6 +342,129 @@ gradlew.bat test --tests "*IntegrationTest"  # integration tests (needs Docker)
    LocalStack), making it easy to develop and test without real AWS.
 6. It has a full **test suite** (unit + integration) and **Swagger UI** for
    exploring the API.
+7. Security is defined as **infrastructure-as-code** (CloudFormation) covering
+   **IAM**, **Secrets Manager**, and **KMS** (see Step 4, below).
+
+---
+
+## 14. Step 4 — Security (IAM + Secrets Manager + KMS)
+
+Security is modeled as infrastructure-as-code in
+`src/main/resources/cloudformation/security.yaml` (deployment steps are below).
+
+```
+IAM
+ ├── Spring Boot permissions   (DynamoDB + SNS/SQS + Secrets + KMS)
+ ├── Lambda permissions        (DynamoDB update + KMS decrypt)
+ └── EKS permissions           (cluster + worker node roles)
+
+Secrets Manager
+ └── application secrets       (auto-generated username + strong password)
+
+KMS
+ └── encryption keys           (customer-managed key with rotation)
+```
+
+### The concepts, explained simply
+
+- **IAM** (Identity and Access Management) is AWS's **permission system**. It
+  answers "who is allowed to do what to which resources?". Each component
+  (Spring Boot app, Lambda, EKS) gets its own **role** with the smallest set of
+  permissions it actually needs — this is called **least privilege**.
+- **Secrets Manager** safely stores **passwords, API keys, and tokens**. Instead
+  of hard-coding secrets in code, the app fetches them at runtime. It can also
+  auto-generate and rotate strong passwords.
+- **KMS** (Key Management Service) manages the **encryption keys** used to
+  scramble data so only authorized parties can read it. The secret is encrypted
+  with our own KMS key.
+
+### Why it matters
+
+- **Least-privilege IAM** limits the blast radius if one component is
+  compromised — the Spring Boot app can only touch the `Orders` table, not any
+  other table or service.
+- **Secrets Manager** removes hard-coded credentials from code (a common
+  security anti-pattern).
+- **KMS** encrypts secrets and (optionally) data at rest, with automatic key
+  rotation.
+
+### What the template creates
+
+| Resource | Type | Purpose |
+|----------|------|---------|
+| `OrdersEncryptionKey` (+ alias) | KMS | Encryption key with rotation |
+| `ApplicationSecret` | Secrets Manager | Auto-generated `{username, password}` JSON |
+| `SpringBootAppRole` | IAM | Least-privilege role for the app |
+| `LambdaConsumerRole` | IAM | Role for the Lambda consumer |
+| `EksClusterRole` / `EksNodeRole` | IAM | Roles for EKS cluster + nodes |
+
+### Deploy it
+
+**Prerequisites**: AWS CLI installed and configured (`aws configure`), plus IAM
+permissions to create roles, KMS keys, and secrets.
+
+```bash
+aws cloudformation create-stack \
+  --stack-name order-platform-security \
+  --template-body file://src/main/resources/cloudformation/security.yaml \
+  --parameters ParameterKey=Stage,ParameterValue=dev \
+  --capabilities CAPABILITY_NAMED_IAM
+```
+
+> `CAPABILITY_NAMED_IAM` is required because the stack creates IAM roles with
+> explicit names.
+
+**Useful commands:**
+
+```bash
+# Watch the stack create
+aws cloudformation describe-stacks --stack-name order-platform-security
+
+# Get the resource ARNs (for wiring into the app / Lambda / EKS)
+aws cloudformation describe-stacks --stack-name order-platform-security \
+  --query "Stacks[0].Outputs"
+
+# Read the generated secret value
+aws secretsmanager get-secret-value \
+  --secret-id order-platform/dev/application \
+  --query SecretString --output text
+
+# Delete the stack when done
+aws cloudformation delete-stack --stack-name order-platform-security
+```
+
+### IAM — Spring Boot app permissions (detail)
+
+The app role (`order-platform-app-dev`) is granted **least-privilege** access:
+
+- **DynamoDB**: read/write on the `Orders` table only.
+- **SNS**: `sns:Publish` on the `order-events` topic only.
+- **SQS**: receive/delete on the two queues only.
+- **Secrets Manager**: `GetSecretValue` on the one secret only.
+- **KMS**: `Decrypt`/`GenerateDataKey` on our key only.
+
+### IAM — Lambda permissions (detail)
+
+The Lambda role (`order-platform-lambda-dev`) gets:
+
+- **DynamoDB**: `GetItem`/`UpdateItem` on `Orders` (to mark orders `NOTIFIED`).
+- **KMS**: `Decrypt` (to read secrets).
+- Plus the standard `AWSLambdaBasicExecutionRole` for CloudWatch Logs.
+
+### IAM — EKS permissions (detail)
+
+Two roles:
+
+- **Cluster role** (`order-platform-eks-cluster-dev`) with `AmazonEKSClusterPolicy`.
+- **Node role** (`order-platform-eks-node-dev`) with worker-node, CNI, and ECR
+  read policies.
+
+### Note on EKS pod access (IRSA)
+
+To let a pod running in EKS assume the app role, enable **IAM Roles for Service
+Accounts (IRSA)**. The template includes a commented-out
+`sts:AssumeRoleWithWebIdentity` trust statement — fill in your cluster's OIDC
+provider ARN and uncomment it.
 
 
 

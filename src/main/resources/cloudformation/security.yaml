@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Order Platform - Security stack (Step 4).
+  Creates the KMS encryption key, Secrets Manager secret, and IAM roles for
+  the Spring Boot app, the Lambda consumer, and EKS.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+
+  ApplicationName:
+    Type: String
+    Default: order-platform
+    Description: Name used to prefix resources.
+
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment stage (used in resource naming).
+
+  SecretsUsername:
+    Type: String
+    Default: app-user
+    Description: Username stored in the Secrets Manager secret.
+
+  SecretsPasswordLength:
+    Type: Number
+    Default: 32
+    MinValue: 16
+    MaxValue: 64
+    Description: Length of the auto-generated password.
+
+# ---------------------------------------------------------------------------
+# 1. KMS — encryption keys
+# ---------------------------------------------------------------------------
+Resources:
+
+  # Master key used to encrypt secrets and (optionally) DynamoDB at rest.
+  OrdersEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub "KMS key for ${ApplicationName} (${Stage})"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          # Grant the AWS account root full control; IAM policies below then
+          # delegate granular kms:Decrypt / kms:Encrypt to the individual roles.
+          - Sid: Enable IAM and root permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: "*"
+
+  OrdersEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ApplicationName}-${Stage}"
+      TargetKeyId: !Ref OrdersEncryptionKey
+
+# ---------------------------------------------------------------------------
+# 2. Secrets Manager — application secrets
+# ---------------------------------------------------------------------------
+  ApplicationSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ApplicationName}/${Stage}/application"
+      Description: !Sub "Application secrets for ${ApplicationName} (${Stage})"
+      # Encrypt the secret with our own KMS key (instead of the AWS default).
+      KmsKeyId: !Ref OrdersEncryptionKey
+      # Auto-generate a strong random password and embed it into the JSON.
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${SecretsUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: !Ref SecretsPasswordLength
+        ExcludeCharacters: '"@/\'
+
+# ---------------------------------------------------------------------------
+# 3. IAM — Spring Boot application permissions
+# ---------------------------------------------------------------------------
+  SpringBootAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-app-${Stage}"
+      Description: !Sub "Role for the ${ApplicationName} Spring Boot service (${Stage})"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Allow the role to be assumed by an ECS/Fargate task.
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+          # Allow the role to be assumed by an EKS pod via IRSA (web identity).
+          # Replace OIDC_PLACEHOLDER with your cluster's OIDC provider, e.g.
+          #   arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/ABCD...
+          # and uncomment:
+          # - Effect: Allow
+          #   Principal:
+          #     Federated: OIDC_PLACEHOLDER
+          #   Action: sts:AssumeRoleWithWebIdentity
+          #   Condition:
+          #     StringEquals:
+          #       "oidc.eks.us-east-1.amazonaws.com/id/ABCD...:sub": "system:serviceaccount:default:order-platform"
+      Policies:
+        # Read/write access to the Orders table only.
+        - PolicyName: dynamodb-orders-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Orders"
+              - Effect: Allow
+                Action: dynamodb:ListTables
+                Resource: "*"
+        # Publish order events to SNS, and receive/delete from SQS.
+        - PolicyName: messaging-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Sub "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:order-events"
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-processor-queue"
+                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-lambda-queue"
+        # Read exactly one secret.
+        - PolicyName: secrets-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref ApplicationSecret
+        # Decrypt with our KMS key (to read the secret / decrypt data).
+        - PolicyName: kms-decrypt
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt OrdersEncryptionKey.Arn
+
+# ---------------------------------------------------------------------------
+# 4. IAM — Lambda permissions
+# ---------------------------------------------------------------------------
+  LambdaConsumerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-lambda-${Stage}"
+      Description: !Sub "Role for the ${ApplicationName} Lambda consumer (${Stage})"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Standard CloudWatch Logs access for Lambda.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        # Update order status in DynamoDB.
+        - PolicyName: dynamodb-update-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Orders"
+        # Decrypt secrets with our KMS key.
+        - PolicyName: kms-decrypt
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt OrdersEncryptionKey.Arn
+
+# ---------------------------------------------------------------------------
+# 5. IAM — EKS permissions
+# ---------------------------------------------------------------------------
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-eks-cluster-${Stage}"
+      Description: !Sub "Role for the ${ApplicationName} EKS cluster (${Stage})"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEKSClusterPolicy"
+
+  EksNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ApplicationName}-eks-node-${Stage}"
+      Description: !Sub "Role for the ${ApplicationName} EKS worker nodes (${Stage})"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy"
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+
+  KmsKeyArn:
+    Description: ARN of the KMS encryption key.
+    Value: !GetAtt OrdersEncryptionKey.Arn
+
+  KmsKeyId:
+    Description: ID of the KMS encryption key.
+    Value: !Ref OrdersEncryptionKey
+
+  SecretArn:
+    Description: ARN of the Secrets Manager secret.
+    Value: !Ref ApplicationSecret
+
+  SpringBootAppRoleArn:
+    Description: ARN of the Spring Boot app IAM role.
+    Value: !GetAtt SpringBootAppRole.Arn
+
+  LambdaConsumerRoleArn:
+    Description: ARN of the Lambda consumer IAM role.
+    Value: !GetAtt LambdaConsumerRole.Arn
+
+  EksClusterRoleArn:
+    Description: ARN of the EKS cluster IAM role.
+    Value: !GetAtt EksClusterRole.Arn
+
+  EksNodeRoleArn:
+    Description: ARN of the EKS node IAM role.
+    Value: !GetAtt EksNodeRole.Arn
+
+
+
+
