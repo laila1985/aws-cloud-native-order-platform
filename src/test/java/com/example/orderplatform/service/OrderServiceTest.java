@@ -1,7 +1,9 @@
 package com.example.orderplatform.service;
 
+import com.example.orderplatform.exception.CustomerNotFoundException;
 import com.example.orderplatform.exception.OrderNotFoundException;
 import com.example.orderplatform.messaging.publisher.OrderEventPublisher;
+import com.example.orderplatform.model.Customer;
 import com.example.orderplatform.model.Order;
 import com.example.orderplatform.model.OrderItem;
 import com.example.orderplatform.repository.OrderRepository;
@@ -32,11 +34,14 @@ class OrderServiceTest {
     @Mock
     private OrderEventPublisher orderEventPublisher;
 
+    @Mock
+    private CustomerService customerService;
+
     private OrderService orderService;
 
     @BeforeEach
     void setUp() {
-        orderService = new OrderService(orderRepository, orderEventPublisher);
+        orderService = new OrderService(orderRepository, orderEventPublisher, customerService);
     }
 
     private OrderItem item(String productId, int quantity, String unitPrice) {
@@ -51,6 +56,8 @@ class OrderServiceTest {
     @Test
     @DisplayName("create() auto-generates id, status and createdAt, and computes total")
     void create_generatesDefaultsAndComputesTotal() {
+        when(customerService.findById("cust-1")).thenReturn(new Customer());
+
         Order order = new Order();
         order.setCustomerId("cust-1");
         order.setItems(List.of(item("p-1", 2, "10.00"), item("p-2", 1, "5.50")));
@@ -68,8 +75,11 @@ class OrderServiceTest {
     @Test
     @DisplayName("create() preserves a provided orderId and status")
     void create_preservesProvidedIdAndStatus() {
+        when(customerService.findById("cust-1")).thenReturn(new Customer());
+
         Order order = new Order();
         order.setOrderId("fixed-id");
+        order.setCustomerId("cust-1");
         order.setStatus("PAID");
         order.setItems(List.of(item("p-1", 1, "9.99")));
 
@@ -83,12 +93,43 @@ class OrderServiceTest {
     @Test
     @DisplayName("create() with no items yields a zero total")
     void create_noItemsYieldsZeroTotal() {
+        when(customerService.findById("cust-1")).thenReturn(new Customer());
+
         Order order = new Order();
         order.setCustomerId("cust-1");
 
         Order result = orderService.create(order);
 
         assertThat(result.getTotalAmount()).isEqualByComparingTo(BigDecimal.ZERO);
+    }
+
+    @Test
+    @DisplayName("create() throws CustomerNotFoundException when customerId is blank")
+    void create_throwsWhenCustomerIdBlank() {
+        Order order = new Order();
+        order.setCustomerId("  ");
+
+        assertThatThrownBy(() -> orderService.create(order))
+                .isInstanceOf(CustomerNotFoundException.class);
+
+        verify(orderRepository, never()).save(any());
+        verify(orderEventPublisher, never()).publish(any());
+    }
+
+    @Test
+    @DisplayName("create() throws CustomerNotFoundException when the customer does not exist")
+    void create_throwsWhenCustomerMissing() {
+        when(customerService.findById("ghost")).thenThrow(new CustomerNotFoundException("ghost"));
+
+        Order order = new Order();
+        order.setCustomerId("ghost");
+
+        assertThatThrownBy(() -> orderService.create(order))
+                .isInstanceOf(CustomerNotFoundException.class)
+                .hasMessageContaining("ghost");
+
+        verify(orderRepository, never()).save(any());
+        verify(orderEventPublisher, never()).publish(any());
     }
 
     @Test

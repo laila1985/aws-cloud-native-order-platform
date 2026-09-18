@@ -32,6 +32,7 @@ class OrderApiIntegrationTest extends AbstractDynamoDbIntegrationTest {
     static void dynamoDbProperties(DynamicPropertyRegistry registry) {
         registry.add("aws.dynamodb.endpoint", AbstractDynamoDbIntegrationTest::dynamoDbEndpoint);
         registry.add("aws.dynamodb.tableName", () -> "Orders");
+        registry.add("aws.dynamodb.customerTableName", () -> "Customers");
         registry.add("aws.accessKeyId", () -> "local");
         registry.add("aws.secretAccessKey", () -> "local");
         registry.add("aws.region", () -> "us-east-1");
@@ -40,6 +41,19 @@ class OrderApiIntegrationTest extends AbstractDynamoDbIntegrationTest {
     @Test
     @DisplayName("full CRUD flow: create -> get -> update -> list -> delete")
     void fullCrudFlow() throws Exception {
+        // An order requires an existing customer, so create one first.
+        mockMvc.perform(post("/api/customers")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "customerId": "cust-1",
+                                  "name": "John",
+                                  "email": "john@example.com",
+                                  "phoneNumber": "+971501234567"
+                                }
+                                """))
+                .andExpect(status().isCreated());
+
         String createBody = """
                 {
                   "customerId": "cust-1",

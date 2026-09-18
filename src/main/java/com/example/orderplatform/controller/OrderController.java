@@ -1,6 +1,7 @@
 package com.example.orderplatform.controller;
 
 import com.example.orderplatform.model.Order;
+import com.example.orderplatform.exception.CustomerNotFoundException;
 import com.example.orderplatform.exception.OrderNotFoundException;
 import com.example.orderplatform.service.OrderService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -72,6 +73,12 @@ public class OrderController {
 
     @ExceptionHandler(OrderNotFoundException.class)
     public ResponseEntity<Map<String, String>> handleNotFound(OrderNotFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    @ExceptionHandler(CustomerNotFoundException.class)
+    public ResponseEntity<Map<String, String>> handleCustomerNotFound(CustomerNotFoundException e) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(Map.of("error", e.getMessage()));
     }

@@ -1,6 +1,7 @@
 package com.example.orderplatform.controller;
 
 import com.example.orderplatform.model.Order;
+import com.example.orderplatform.exception.CustomerNotFoundException;
 import com.example.orderplatform.exception.OrderNotFoundException;
 import com.example.orderplatform.service.OrderService;
 import org.junit.jupiter.api.DisplayName;
@@ -106,5 +107,18 @@ class OrderControllerTest {
     void delete_returnsNoContent() throws Exception {
         mockMvc.perform(delete("/api/orders/id-1"))
                 .andExpect(status().isNoContent());
+    }
+
+    @Test
+    @DisplayName("POST /api/orders returns 404 when the customer does not exist")
+    void create_returnsNotFoundWhenCustomerMissing() throws Exception {
+        when(orderService.create(any(Order.class)))
+                .thenThrow(new CustomerNotFoundException("ghost"));
+
+        mockMvc.perform(post("/api/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"customerId\":\"ghost\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("Customer not found: ghost"));
     }
 }

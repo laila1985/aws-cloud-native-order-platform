@@ -1,6 +1,7 @@
 package com.example.orderplatform.service;
 
 import com.example.orderplatform.event.OrderCreatedEvent;
+import com.example.orderplatform.exception.CustomerNotFoundException;
 import com.example.orderplatform.exception.OrderNotFoundException;
 import com.example.orderplatform.messaging.publisher.OrderEventPublisher;
 import com.example.orderplatform.model.Order;
@@ -29,13 +30,23 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final OrderEventPublisher orderEventPublisher;
+    private final CustomerService customerService;
 
-    public OrderService(OrderRepository orderRepository, OrderEventPublisher orderEventPublisher) {
+    public OrderService(OrderRepository orderRepository,
+                        OrderEventPublisher orderEventPublisher,
+                        CustomerService customerService) {
         this.orderRepository = orderRepository;
         this.orderEventPublisher = orderEventPublisher;
+        this.customerService = customerService;
     }
 
     public Order create(Order order) {
+        // Referential integrity: an order must reference an existing customer.
+        if (order.getCustomerId() == null || order.getCustomerId().isBlank()) {
+            throw new CustomerNotFoundException("(missing)");
+        }
+        customerService.findById(order.getCustomerId());
+
         if (order.getOrderId() == null || order.getOrderId().isBlank()) {
             order.setOrderId(UUID.randomUUID().toString());
         }
