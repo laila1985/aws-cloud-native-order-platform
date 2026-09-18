@@ -106,8 +106,8 @@ Resources:
           #     StringEquals:
           #       "oidc.eks.us-east-1.amazonaws.com/id/ABCD...:sub": "system:serviceaccount:default:order-platform"
       Policies:
-        # Read/write access to the Orders table only.
-        - PolicyName: dynamodb-orders-access
+        # Read/write access to the Orders and Customers tables.
+        - PolicyName: dynamodb-access
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -119,18 +119,27 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:Scan
                   - dynamodb:Query
-                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Orders"
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Orders"
+                  - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Customers"
               - Effect: Allow
                 Action: dynamodb:ListTables
                 Resource: "*"
-        # Publish order events to SNS, and receive/delete from SQS.
+        # Publish order events to SNS, receive/delete from SQS, and send
+        # customer notifications (SES email + SNS direct SMS publish).
         - PolicyName: messaging-access
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              # Publish the OrderCreatedEvent to the fan-out topic, and send SMS
+              # via direct phone-number publish (same sns:Publish action).
               - Effect: Allow
                 Action: sns:Publish
                 Resource: !Sub "arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:order-events"
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: "*"   # direct SMS publish is not scoped to a topic ARN
+              # Poll the five fan-out queues.
               - Effect: Allow
                 Action:
                   - sqs:ReceiveMessage
@@ -139,6 +148,13 @@ Resources:
                 Resource:
                   - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-processor-queue"
                   - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-lambda-queue"
+                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-email-queue"
+                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-sms-queue"
+                  - !Sub "arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:order-shipping-queue"
+              # Send order-confirmation emails through SES.
+              - Effect: Allow
+                Action: ses:SendEmail
+                Resource: "*"   # SES identity (domain/email) is verified separately
         # Read exactly one secret.
         - PolicyName: secrets-read
           PolicyDocument:

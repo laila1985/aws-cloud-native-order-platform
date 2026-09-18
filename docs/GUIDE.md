@@ -1193,6 +1193,51 @@ KMS
 - **KMS** = manages encryption keys (scrambles data so only authorized parties
   can read it).
 
+### The mental model (read this first)
+
+In AWS, **everything is locked by default**. A program (your app, a Lambda) can't
+touch *anything* — not DynamoDB, not SNS, not a secret — unless you explicitly
+give it permission. And those permissions don't live in your Java code; they live
+in **IAM roles** that you attach to *the thing running your code*.
+
+Step 4 answers three questions:
+
+1. **How do we keep passwords safe?** → Secrets Manager (a vault), encrypted with KMS.
+2. **How do we let the app work without giving it the keys to the kingdom?**
+   → IAM roles with narrow, least-privilege permissions.
+3. **How do we encrypt data?** → KMS keys.
+
+The three parts work as a chain:
+
+```
+KMS key ──────────────────────────────┐
+   ▲                                  │ (encrypts the secret)
+   │                                  ▼
+   │   needs kms:Decrypt     Secrets Manager secret
+   │         │                          ▲
+   │         └─────── SpringBootAppRole ┘  (needs secretsmanager:GetSecretValue)
+   │                   │
+   └───────────────────┴── also needs kms:Decrypt to read the decrypted value
+                       │
+            the app (ECS task / Lambda) "puts on" the role and does its job
+```
+
+Think of an **IAM role as an ID badge**:
+
+- The **"trust"** part (`AssumeRolePolicyDocument`) says *who may wear the badge*
+  (e.g. "only an ECS task may become this role").
+- The **"permissions"** part (`Policies`) says *what the badge lets you do*
+  (e.g. "read/write the Orders table, publish to one SNS topic, read one secret").
+
+Every permission is `Action` (what) + `Resource` (on which thing), scoped as
+tightly as possible — this is **least privilege**: if one component is
+compromised, the damage is limited to the small set of things it was allowed to
+touch.
+
+> Locally you never deal with this: `docker-compose` runs emulators with no real
+> IAM, and `application.yml` uses static `accessKeyId`/`secretAccessKey`
+> placeholders. IAM / KMS / Secrets Manager only matter on **real AWS**.
+
 ### File: `src/main/resources/cloudformation/security.yaml`
 
 The template is a YAML document with `Parameters`, `Resources`, and `Outputs`.
@@ -1283,7 +1328,8 @@ Resources:
 
 #### The IAM roles
 
-There are three roles. Here's the Spring Boot one (the most important):
+There are four roles (the Spring Boot app, the Lambda, and two EKS roles).
+Here's the Spring Boot one (the most important):
 
 ```yaml
   SpringBootAppRole:
@@ -1298,31 +1344,58 @@ There are three roles. Here's the Spring Boot one (the most important):
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       Policies:                                  # (10)
-        - PolicyName: dynamodb-orders-access
+        - PolicyName: dynamodb-access
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Scan
-                  - dynamodb:Query
-                Resource: !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/Orders"
+                Action: [GetItem, PutItem, UpdateItem, DeleteItem, Scan, Query]
+                Resource:
+                  - ...table/Orders
+                  - ...table/Customers
+        - PolicyName: messaging-access
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: ...sns:...:order-events
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource:
+                  - ...order-processor-queue
+                  - ...order-lambda-queue
+                  - ...order-email-queue
+                  - ...order-sms-queue
+                  - ...order-shipping-queue
+              - Effect: Allow
+                Action: ses:SendEmail
+                Resource: "*"
 ```
 
 9. **`AssumeRolePolicyDocument`** — *who can assume this role*. Here, ECS tasks
    (i.e., the running app) can. In EKS you'd add a `Federated` (web identity)
    trust — the template has a commented-out example.
 
-10. **`Policies`** — the actual permissions, following **least privilege**: the app
-    can only touch the `Orders` table (the `Resource` restricts it to exactly that
-    ARN), only publish to one SNS topic, only read one secret, and only decrypt
-    with one key. This limits the "blast radius" if the app is compromised.
+10. **`Policies`** — the actual permissions, following **least privilege**:
 
-The other two roles follow the same shape:
+    - **DynamoDB** — read/write the `Orders` **and** `Customers` tables only.
+    - **Messaging** — publish to the one SNS topic; poll the **five** fan-out
+      queues (processor, lambda, email, sms, shipping); send SMS via direct
+      publish; and send email via SES.
+
+    Each permission is `Action` (what) + `Resource` (which thing), so the app
+    can't, say, delete the whole table or touch another AWS service. This limits
+    the "blast radius" if the app is compromised.
+
+> **Two `Resource: "*"` notes:** SNS *direct* SMS publish (`sns:Publish` to a
+> phone number) and SES `SendEmail` are **not** scoped to a topic/queue ARN, so
+> they use `"*"`. For SES you additionally verify the sender domain/email
+> separately in the SES console; for SMS the phone number itself carries the
+> cost, not a scoped ARN. These are broader than ideal — in a hardened setup you'd
+> use `Condition` keys (e.g. restrict SES to a specific sender identity) to
+> tighten them further.
+
+The other three roles follow the same shape:
 - **`LambdaConsumerRole`** — `dynamodb:GetItem`/`UpdateItem` on `Orders` + KMS
   decrypt + `AWSLambdaBasicExecutionRole` (CloudWatch logs).
 - **`EksClusterRole`** / **`EksNodeRole`** — EKS cluster + worker-node managed
