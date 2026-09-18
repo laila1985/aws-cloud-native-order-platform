@@ -48,16 +48,16 @@ on startup.
 ## Security (Step 4)
 
 Security is defined as infrastructure-as-code (CloudFormation) — IAM roles,
-Secrets Manager, and KMS. See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) §14.
+Secrets Manager, and KMS. See [`docs/GUIDE.md`](docs/GUIDE.md) — "Step 4".
 
 ## Redis caching (Step 5)
 
 `GET /orders/{id}` is cached in **Redis** (ElastiCache in AWS) using the
-cache-aside pattern. See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) §15.
+cache-aside pattern. See [`docs/GUIDE.md`](docs/GUIDE.md) — "Step 5".
 
 ## Documentation
 
-- **Beginner's guide & technical spec**: [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md)
+- **Complete guide** (what it is + how it was built, line by line): [`docs/GUIDE.md`](docs/GUIDE.md)
 
 ## Stack
 
