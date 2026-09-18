@@ -26,12 +26,15 @@
 
 ### What we're building
 
-A **backend web service** that manages **orders**. It can:
+A **backend web service** that manages **customers** and **orders**. It can:
 
-- Create, read, update, and delete orders (REST API).
-- Store them in **DynamoDB** (a NoSQL database on AWS).
-- Publish an event when an order is created, which fans out through **SNS** to an
-  **SQS** consumer and a **Lambda**-like consumer (asynchronous processing).
+- Create and read customers, and create, read, update, and delete orders (REST API).
+- Store them in **DynamoDB** (a NoSQL database on AWS) — two tables: `Customers`
+  and `Orders`. An order must belong to an existing customer.
+- Publish an event when an order is created, which fans out through **SNS** to
+  **five** consumers (asynchronous processing): an order processor, a
+  Lambda-like consumer, an email notification, an SMS notification, and a
+  shipping processor.
 - Secure the whole thing with **IAM**, **Secrets Manager**, and **KMS**.
 - Cache reads in **Redis** so they are fast.
 
@@ -102,15 +105,21 @@ write small classes, annotate them, and Spring connects them automatically.
 src/main/java/com/example/orderplatform/
 ├── OrderPlatformApplication.java   ← the starting point
 ├── config/                          ← Spring configuration beans
-├── controller/                      ← HTTP endpoints
-├── model/                           ← data classes (Order, OrderItem)
-├── repository/                      ← DynamoDB access
-├── service/                         ← business logic
+├── controller/                      ← HTTP endpoints (orders + customers)
+├── model/                           ← data classes (Customer, Order, OrderItem)
+├── repository/                      ← DynamoDB access (Order + Customer)
+├── service/                         ← business logic (Order + Customer)
 ├── event/                           ← event published to SNS
+├── exception/                       ← not-found exceptions
 └── messaging/                       ← SNS/SQS publishing and consuming
+    ├── MessagingResources.java      ← topic/queue provisioning
+    ├── publisher/                  ← publishes events to SNS
+    ├── consumer/                    ← order processors (PROCESSED / NOTIFIED / SHIPPING)
+    └── notification/               ← email/SMS notification pipeline
 src/main/resources/
 ├── application.yml                  ← configuration
-└── cloudformation/security.yaml     ← Step 4 IaC template
+├── cloudformation/security.yaml     ← Step 4 IaC template
+└── templates/                       ← notification templates (email body)
 ```
 
 ---
@@ -125,10 +134,11 @@ A quick reference for the key facts, before we go line by line.
 |------------|-----------|---------------|
 | **Java 21** | Programming language | Modern, widely-used, runs the app |
 | **Spring Boot 3.3** | Web framework | Handles HTTP, configuration, and "wiring" the layers together |
-| **AWS SDK v2** | Library to talk to AWS | Lets Java code use DynamoDB, SNS, and SQS |
-| **DynamoDB** | NoSQL database (AWS) | Stores orders — fast, scalable, serverless |
+| **AWS SDK v2** | Library to talk to AWS | Lets Java code use DynamoDB, SNS, SQS, and SES |
+| **DynamoDB** | NoSQL database (AWS) | Stores customers & orders — fast, scalable, serverless |
 | **SNS** | Pub/sub messaging (AWS) | Fans out order events to multiple subscribers |
 | **SQS** | Queue messaging (AWS) | Buffers messages for asynchronous processing |
+| **SES** | Email service (AWS) | Sends the order-confirmation emails |
 | **Redis / ElastiCache** | In-memory cache | Fast reads for `GET /orders/{id}` |
 | **Gradle** | Build tool | Compiles and packages the app |
 | **Swagger/OpenAPI** | API documentation | Interactive UI to explore and test the API |
@@ -137,15 +147,24 @@ A quick reference for the key facts, before we go line by line.
 
 ### Data model
 
-There are two "objects" (Java classes) that describe our data.
+There are three "objects" (Java classes) that describe our data.
+
+**`Customer`** (who places orders):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `customerId` | String | Unique identifier (the **partition key** in DynamoDB) |
+| `name` | String | Customer's name |
+| `email` | String | Email address (used by the email notification) |
+| `phoneNumber` | String | Phone number in E.164 (used by the SMS notification) |
 
 **`Order`** (the main entity):
 
 | Field | Type | Meaning |
 |-------|------|---------|
 | `orderId` | String | Unique identifier (the **partition key** in DynamoDB) |
-| `customerId` | String | Who placed the order |
-| `status` | String | Lifecycle state (`CREATED` → `PROCESSED` → `NOTIFIED`) |
+| `customerId` | String | Who placed the order (must reference an existing `Customer`) |
+| `status` | String | Lifecycle state (`CREATED` → `PROCESSED` → `NOTIFIED` / `SHIPPING`) |
 | `items` | List of `OrderItem` | The products purchased |
 | `totalAmount` | BigDecimal | Total cost (calculated, not typed by user) |
 | `createdAt` | Instant | When the order was created |
@@ -159,10 +178,15 @@ There are two "objects" (Java classes) that describe our data.
 | `quantity` | Integer | How many |
 | `unitPrice` | BigDecimal | Price of one unit |
 
-**DynamoDB table:** `Orders`, with **partition key** `orderId`.
+**DynamoDB tables:** `Customers` (partition key `customerId`) and `Orders`
+(partition key `orderId`).
 
 > A *partition key* is DynamoDB's way of uniquely identifying and physically
 > distributing a record — like the "primary key" in a traditional database.
+
+> **Referential integrity:** an order can only be created if its `customerId`
+> points to an existing customer. The `customerId` is **immutable** after
+> creation — an order can't be reassigned to a different customer.
 
 ### The REST API
 
@@ -170,6 +194,8 @@ The API follows **REST** conventions: HTTP methods map to actions on resources.
 
 | Method | Endpoint | What it does | Success code |
 |--------|----------|--------------|--------------|
+| `POST` | `/api/customers` | Create a customer | `201 Created` |
+| `GET` | `/api/customers/{customerId}` | Fetch one customer | `200 OK` |
 | `POST` | `/api/orders` | Create a new order | `201 Created` |
 | `GET` | `/api/orders/{orderId}` | Fetch one order | `200 OK` |
 | `GET` | `/api/orders` | List all orders | `200 OK` |
@@ -179,7 +205,20 @@ The API follows **REST** conventions: HTTP methods map to actions on resources.
 If you request an order that doesn't exist, the API returns **`404 Not Found`**
 with a helpful error message like `{"error": "Order not found: 123"}`.
 
-**Example** — creating an order (JSON sent to `POST /api/orders`):
+Creating an order requires an existing customer. A missing or unknown
+`customerId` returns **`404`** (`{"error": "Customer not found: ..."}`), and
+trying to change an order's `customerId` returns **`400`**.
+
+**Example** — first create a customer, then create an order:
+
+```json
+{
+  "customerId": "cust-123",
+  "name": "John",
+  "email": "john@example.com",
+  "phoneNumber": "+971501234567"
+}
+```
 
 ```json
 {
@@ -276,6 +315,7 @@ dependencies {
     implementation "software.amazon.awssdk:dynamodb:..."                   // (5)
     implementation "software.amazon.awssdk:sns:..."                        // (6)
     implementation "software.amazon.awssdk:sqs:..."                        // (6)
+    implementation "software.amazon.awssdk:ses:..."                        // (6)
     implementation 'org.springframework.boot:spring-boot-starter-data-redis' // (7)
     implementation 'org.springframework.boot:spring-boot-starter-cache'      // (7)
     testImplementation 'org.springframework.boot:spring-boot-starter-test'    // (8)
@@ -300,7 +340,7 @@ dependencies {
 5. **`software.amazon.awssdk:dynamodb`** — The AWS SDK for DynamoDB
    (`dynamodb-enhanced` is a friendlier layer on top).
 
-6. **`sns` / `sqs`** — AWS SDK clients for messaging (Step 3).
+6. **`sns` / `sqs` / `ses`** — AWS SDK clients for messaging and email (Step 3).
 
 7. **`spring-boot-starter-data-redis` + `-cache`** — Redis client + caching
    annotations (Step 5).
@@ -464,6 +504,11 @@ public class OrderService {
     }
 
     public Order create(Order order) {                          // (3)
+        // Referential integrity: the order must reference an existing customer.
+        if (order.getCustomerId() == null || order.getCustomerId().isBlank()) {
+            throw new CustomerNotFoundException("(missing)");   // (3a)
+        }
+        customerService.findById(order.getCustomerId());        // (3b)
         if (order.getOrderId() == null || order.getOrderId().isBlank()) {
             order.setOrderId(UUID.randomUUID().toString());     // (4)
         }
@@ -497,9 +542,14 @@ public class OrderService {
 
 1. **`@Service`** — Create this as a bean (business layer).
 
-2. **Dependencies** — the repository (save/load) and (Step 3) the publisher.
+2. **Dependencies** — the repository (save/load), the customer service (referential
+   integrity), and (Step 3) the publisher.
 
 3. **`create`** — the "create order" flow.
+
+3a–3b. **Referential integrity** — before anything else, reject a blank/missing
+`customerId`, then verify the customer actually exists. This guarantees an order
+is always issued by a real customer.
 
 4. **`UUID.randomUUID()`** — If no `orderId` supplied, generate a random
    globally-unique ID.
@@ -747,11 +797,13 @@ background. The flow:
 ```
                         ┌── SQS ──► Order Processor   → marks order "PROCESSED"
                         │
-Order API ──► SNS ──────┼── SQS ──► Lambda-like      → marks order "NOTIFIED"
-   (create)             │
-                        ├── email  ──► plain-text email sent
+                        ├── SQS ──► Lambda-like       → marks order "NOTIFIED"
                         │
-                        └── SMS    ──► text message sent
+Order API ──► SNS ─────┼── SQS ──► Email handler    → confirmation email (SES)
+   (create)             │
+                        ├── SQS ──► SMS handler       → text message (SNS)
+                        │
+                        └── SQS ──► Shipping processor → marks order "SHIPPING"
 ```
 
 **The ideas, in one line each:**
@@ -759,8 +811,16 @@ Order API ──► SNS ──────┼── SQS ──► Lambda-like   
 - **SNS** = a megaphone. Publish once, many subscribers get a copy ("fan-out").
 - **SQS** = a queue. Messages wait in line for a worker.
 - **Lambda** = a serverless function (emulated locally with a second queue).
-- **email** = SNS sends a plain-text email to an address (protocol `"email"`).
-- **sms** = SNS sends a text message to a phone number (protocol `"sms"`).
+- **email** = a consumer looks up the customer and sends email through **SES**.
+- **sms** = a consumer looks up the customer and sends a text through **SNS**
+  (direct publish to the customer's phone number).
+- **shipping** = a consumer marks the order `SHIPPING` (a workflow, like `PROCESSED`).
+
+> The **email** and **SMS** branches are *notification* pipelines (they build and
+> send a message to the customer), while the **processor**, **lambda**, and
+> **shipping** branches are *workflow* consumers (they change the order's status).
+> Notification code lives in `messaging/notification/`; workflow consumers live in
+> `messaging/consumer/`.
 
 ### 3a. The event — `OrderCreatedEvent.java`
 
@@ -783,13 +843,15 @@ Jackson (Spring's JSON library) turns this record into JSON when we publish it.
 
 ### 3b. The clients — `MessagingConfig.java`
 
-Mirrors `DynamoDbConfig`, but creates `SnsClient` and `SqsClient` beans:
+Mirrors `DynamoDbConfig`, but creates `SnsClient`, `SqsClient`, and `SesClient`
+beans:
 
 ```java
 @Configuration
 public class MessagingConfig {
     @Value("${aws.sns.endpoint:}")  private String snsEndpoint;   // (1)
     @Value("${aws.sqs.endpoint:}")  private String sqsEndpoint;
+    @Value("${aws.ses.endpoint:}")  private String sesEndpoint;
 
     @Bean
     public SnsClient snsClient() {
@@ -800,19 +862,22 @@ public class MessagingConfig {
         // ... credentials ...
         return builder.build();
     }
-    // sqsClient() is identical but returns an SqsClient
+    // sqsClient() and sesClient() are identical but return SqsClient / SesClient
 }
 ```
 
-1. Reads the SNS/SQS endpoints from config (both `http://localhost:4566` locally —
-   LocalStack's single port for all services).
+1. Reads the SNS/SQS/SES endpoints from config (all `http://localhost:4566`
+   locally — LocalStack's single port for all services).
 
 2. Same `endpointOverride` trick — redirect to LocalStack instead of real AWS.
 
+> **`SesClient`** is the AWS client for **SES** (Simple Email Service). It's the
+> "email provider" that the email notification pipeline uses to actually send mail.
+
 ### 3c. Provisioning resources — `MessagingResources.java`
 
-This creates the topic, the queues, and the subscriptions on startup (so you don't
-have to create them by hand).
+This creates the topic, the **five** queues, and their subscriptions on startup
+(so you don't have to create them by hand).
 
 ```java
 @Component                                                  // (1)
@@ -823,34 +888,28 @@ public class MessagingResources {
         try {
             topicArn = ensureTopic();                        // (3)
             processorQueueUrl = ensureQueue(processorQueueName);
-            lambdaQueueUrl = ensureQueue(lambdaQueueName);
-            subscribeQueue(topicArn, processorQueueUrl);     // (4)
+            lambdaQueueUrl    = ensureQueue(lambdaQueueName);
+            emailQueueUrl     = ensureQueue(emailQueueName);  // (4)
+            smsQueueUrl       = ensureQueue(smsQueueName);
+            shippingQueueUrl  = ensureQueue(shippingQueueName);
+            subscribeQueue(topicArn, processorQueueUrl);     // (5)
             subscribeQueue(topicArn, lambdaQueueUrl);
-            subscribeEmail();                                // (5)
-            subscribeSms();                                  // (6)
+            subscribeQueue(topicArn, emailQueueUrl);
+            subscribeQueue(topicArn, smsQueueUrl);
+            subscribeQueue(topicArn, shippingQueueUrl);
         } catch (Exception e) {
             log.warn("Could not provision messaging resources ...", e);
         }
     }
 
     private void subscribeQueue(String topicArn, String queueUrl) {
-        String queueArn = sqsClient.getQueueAttributes(...); // (7)
+        String queueArn = sqsClient.getQueueAttributes(...); // (6)
         subscribe(topicArn, "sqs", queueArn);
-    }
-
-    private void subscribeEmail() {
-        if (emailSubscriber == null || emailSubscriber.isBlank()) return;  // (8)
-        subscribe(topicArn, "email", emailSubscriber);
-    }
-
-    private void subscribeSms() {
-        if (smsSubscriber == null || smsSubscriber.isBlank()) return;      // (9)
-        subscribe(topicArn, "sms", smsSubscriber);
     }
 
     private void subscribe(String topicArn, String protocol, String endpoint) {
         snsClient.subscribe(SubscribeRequest.builder()
-                .topicArn(topicArn).protocol(protocol).endpoint(endpoint).build()); // (10)
+                .topicArn(topicArn).protocol(protocol).endpoint(endpoint).build()); // (7)
     }
 }
 ```
@@ -863,24 +922,22 @@ public class MessagingResources {
 3. **`ensureTopic`** — `createTopic` is *idempotent*: if the topic already exists,
    AWS/LocalStack returns the existing one. So "ensure" = "create if missing."
 
-4. **`subscribeQueue`** — Wire each SQS queue to the topic.
+4. **Five queues** — one per downstream branch: processor, lambda, email, sms, and
+   shipping.
 
-5–6. **`subscribeEmail` / `subscribeSms`** — optionally add email/SMS subscribers,
-   skipped when their config value is blank.
+5. **`subscribeQueue`** — Wire each SQS queue to the topic.
 
-7. SNS subscribes SQS by the *queue's ARN*, so we first look up the queue's ARN.
+6. SNS subscribes SQS by the *queue's ARN*, so we first look up the queue's ARN.
 
-8–9. **Email/SMS are blank-checked** — if `aws.sns.email`/`aws.sns.sms` is empty,
-   no subscription is created. This keeps them optional.
+7. **`subscribe(protocol, endpoint)`** — the generic helper. For `"sqs"` the
+   endpoint is the queue's **ARN**.
 
-10. **`subscribe(protocol, endpoint)`** — the generic helper. For `"sqs"` the
-    endpoint is the queue's **ARN**; for `"email"` it's a plain **address**; for
-    `"sms"` it's a phone number in **E.164** format (e.g. `+12065550100`).
-
-> **Email/SMS need confirmation in real AWS.** SNS sends a confirmation email /
-> SMS that the recipient must approve before messages flow. And note that
-> **LocalStack records these subscriptions but doesn't actually deliver email or
-> SMS** — so locally they're no-ops; they only become real when deployed to AWS.
+> **Why no `"email"` / `"sms"` SNS protocols anymore?** Earlier versions subscribed
+> SNS directly to email/SMS endpoints. That required confirmation and couldn't send
+> to an arbitrary address/phone. Now email and SMS are **SQS queues consumed by our
+> own handlers**, which call **SES** (email) and **SNS direct publish** (SMS) with
+> the customer's stored `email` / `phoneNumber`. LocalStack records these calls but
+> does not actually deliver email/SMS — that only happens against real AWS.
 
 ### 3d. Publishing — `OrderEventPublisher.java`
 
@@ -987,7 +1044,76 @@ public class OrderProcessor {
 It stands in for a real Lambda. The comments in that file explain how to swap it
 for a real Lambda in AWS.
 
-### 3f. Wiring it into the service
+`ShippingProcessor` is also structurally identical — it reads from
+`shippingQueueUrl()` and calls `updateStatus(..., "SHIPPING")` — driving the
+shipping workflow.
+
+### 3f. The notification consumers — email and SMS
+
+The email and SMS branches are **notification pipelines** (not just status
+updates). Each consumes its own queue, looks up the customer, builds a
+`NotificationMessage`, and runs it through explicit stages before sending:
+
+```
+Email:  SQS → Validate → Load template → Build email → Email provider (SES) → Success
+SMS:    SQS → Validate → Build SMS → SMS provider (SNS) → Success
+```
+
+Both unwrap the SNS envelope and delete the SQS message in a `finally` block,
+exactly like `OrderProcessor`.
+
+**Email** — `EmailNotificationHandler`:
+
+```java
+void handle(OrderCreatedEvent event, Customer customer) {
+    NotificationMessage notification = new NotificationMessage(
+            "notif-" + UUID.randomUUID(),
+            "ORDER_CREATED", "EMAIL", "ORDER_CREATED",
+            dataFor(event, customer),               // orderId, customerName, totalAmount, currency
+            customer.getEmail(),                    // recipient
+            "Order " + event.orderId() + " confirmed", // subject
+            null, null, Instant.now());
+
+    validator.validate(notification);              // 1. validate
+    String template = templateService.load("ORDER_CREATED"); // 2. load template
+    String body = templateService.render(template, notification.data()); // 3. build email
+    emailProvider.send(notification.recipient(), notification.subject(), body); // 4. SES
+    log.info("... success ...");                   // 5. success
+}
+```
+
+The email provider is **SES**: `EmailProvider` calls
+`sesClient.sendEmail(SendEmailRequest...)` with the `aws.ses.senderEmail` "from"
+address. The `TemplateService` loads a body template from
+`src/main/resources/templates/ORDER_CREATED.txt` and substitutes `{{placeholders}}`
+with the message data.
+
+**SMS** — `SmsNotificationHandler`:
+
+```java
+void handle(OrderCreatedEvent event, Customer customer) {
+    String text = "Your order " + event.orderId() + " has been confirmed.";
+    NotificationMessage notification = new NotificationMessage(
+            "notif-" + UUID.randomUUID(),
+            "ORDER_CREATED", "SMS", "ORDER_CREATED",
+            dataFor(event, customer),               // orderId, customerName
+            null, null,
+            customer.getPhoneNumber(),              // phoneNumber
+            text, Instant.now());
+
+    validator.validate(notification);              // 1. validate
+    smsProvider.send(notification.phoneNumber(), notification.message()); // 2. SNS direct publish
+    log.info("... success ...");                   // 3. success
+}
+```
+
+The SMS provider is **SNS direct publish**: `SmsProvider` calls
+`snsClient.publish(PublishRequest.phoneNumber(...))`. This is different from the
+email path — SNS can send a text message to any phone number without a
+subscription, whereas email needs SES (SNS can't send to an arbitrary address
+without subscription + confirmation).
+
+### 3g. Wiring it into the service
 
 Back in `OrderService.create`, after saving:
 
@@ -997,10 +1123,11 @@ orderEventPublisher.publish(new OrderCreatedEvent(
         order.getStatus(), order.getTotalAmount(), order.getCreatedAt()));
 ```
 
-This publishes the event, which SNS fans out to both queues, which the two
-consumers pick up and turn into `PROCESSED` / `NOTIFIED` status updates.
+This publishes the event, which SNS fans out to **five** queues. The workflow
+consumers turn the order into `PROCESSED` / `NOTIFIED` / `SHIPPING`, and the
+notification consumers email/SMS the customer.
 
-### 3g. Configuration and Docker
+### 3h. Configuration and Docker
 
 `application.yml` gains:
 
@@ -1013,22 +1140,30 @@ aws:
     endpoint: http://localhost:4566
     processorQueueName: order-processor-queue
     lambdaQueueName: order-lambda-queue
+    emailQueueName: order-email-queue
+    smsQueueName: order-sms-queue
+    shippingQueueName: order-shipping-queue
     pollIntervalMs: 5000
+  ses:
+    endpoint: http://localhost:4566
+    senderEmail: no-reply@example.com
+  currency: AED
 ```
 
-`docker-compose.yml` gains a **LocalStack** service (emulates SNS+SQS on port
+`docker-compose.yml` gains a **LocalStack** service (emulates SNS+SQS+SES on port
 4566):
 
 ```yaml
 localstack:
   image: localstack/localstack:latest
   environment:
-    - SERVICES=sns,sqs
+    - SERVICES=sns,sqs,ses
   ports:
     - "4566:4566"
 ```
 
-**Done with Step 3.** Order creation now fans out asynchronously.
+**Done with Step 3.** Order creation now fans out asynchronously to five
+consumers.
 
 ---
 
@@ -1329,7 +1464,7 @@ public void delete(String orderId) { ... }
 
 10. **`@CachePut`** — *always* runs the method, but also writes the result to the
     cache. Used by `updateStatus` so when an async consumer marks an order
-    `PROCESSED`/`NOTIFIED`, the cache is refreshed (no stale `CREATED`).
+    `PROCESSED`/`NOTIFIED`/`SHIPPING`, the cache is refreshed (no stale `CREATED`).
 
 11. **`@CacheEvict`** — after `delete`, remove the cached copy too.
 
@@ -1369,7 +1504,7 @@ redis:
 
 | Test type | What it verifies | Needs Docker? |
 |-----------|------------------|---------------|
-| **Unit tests** (`OrderServiceTest`, `OrderControllerTest`, `OrderEventPublisherTest`, `OrderProcessorTest`) | Individual classes in isolation (using Mockito to fake dependencies) | No |
+| **Unit tests** (`OrderServiceTest`, `OrderControllerTest`, `OrderEventPublisherTest`, `OrderProcessorTest`, `ShippingProcessorTest`) | Individual classes in isolation (using Mockito to fake dependencies) | No |
 | **Integration tests** (`OrderRepositoryIntegrationTest`, `OrderApiIntegrationTest`) | Real components together against a real DynamoDB (via Testcontainers) | Yes |
 
 Run tests:
@@ -1405,7 +1540,7 @@ started with Docker:
 | Service | Image | Purpose | Port |
 |---------|-------|---------|------|
 | `dynamodb-local` | `amazon/dynamodb-local` | Emulates DynamoDB | 8000 |
-| `localstack` | `localstack/localstack` | Emulates SNS + SQS | 4566 |
+| `localstack` | `localstack/localstack` | Emulates SNS + SQS + SES | 4566 |
 | `redis` | `redis:7-alpine` | Cache | 6379 |
 
 ---
@@ -1436,10 +1571,16 @@ started with Docker:
 
 Putting it all together, here is the complete application:
 
-1. **Spring Boot** app with a **REST API** (`Controller → Service → Repository`).
-2. **DynamoDB** stores the orders (with `orderId` as the partition key).
-3. On **create**, an event fans out via **SNS** to an **SQS** consumer (marks
-   `PROCESSED`) and a **Lambda-like** consumer (marks `NOTIFIED`).
+1. **Spring Boot** app with a **REST API** (`Controller → Service → Repository`)
+   for both **customers** and **orders**.
+2. **DynamoDB** stores customers (`Customers` table) and orders (`Orders` table).
+   An order must reference an existing, immutable `customerId`.
+3. On **create**, an event fans out via **SNS** to **five** SQS consumers:
+   - an **Order Processor** (marks `PROCESSED`),
+   - a **Lambda-like** consumer (marks `NOTIFIED`),
+   - an **email** notification (SES),
+   - an **SMS** notification (SNS direct publish),
+   - a **shipping** processor (marks `SHIPPING`).
 4. **IAM / Secrets Manager / KMS** secure it (defined as CloudFormation IaC).
 5. **Redis** caches reads (cache-aside), so `GET /orders/{id}` is fast.
 

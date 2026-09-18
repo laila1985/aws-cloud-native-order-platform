@@ -26,9 +26,12 @@ import java.util.Map;
  * and the consumers simply skip polling until resources become available.
  * <p>
  * Flow: {@code Order API → SNS topic → (SQS "order-processor-queue",
- * SQS "order-lambda-queue", SQS "order-email-queue", SQS "order-sms-queue")}.
+ * SQS "order-lambda-queue", SQS "order-email-queue", SQS "order-sms-queue",
+ * SQS "order-shipping-queue")}.
  * The second queue stands in for a real AWS Lambda subscriber. The email and SMS
  * queues feed the {@code EmailNotificationHandler} and {@code SmsNotificationHandler}.
+ * The shipping queue feeds the {@code ShippingProcessor}, which marks orders
+ * {@code SHIPPING}.
  */
 @Component
 public class MessagingResources {
@@ -42,6 +45,7 @@ public class MessagingResources {
     private final String lambdaQueueName;
     private final String emailQueueName;
     private final String smsQueueName;
+    private final String shippingQueueName;
     private final String region;
 
     private volatile String topicArn;
@@ -49,6 +53,7 @@ public class MessagingResources {
     private volatile String lambdaQueueUrl;
     private volatile String emailQueueUrl;
     private volatile String smsQueueUrl;
+    private volatile String shippingQueueUrl;
 
     public MessagingResources(SnsClient snsClient,
                               SqsClient sqsClient,
@@ -57,6 +62,7 @@ public class MessagingResources {
                               @Value("${aws.sqs.lambdaQueueName:order-lambda-queue}") String lambdaQueueName,
                               @Value("${aws.sqs.emailQueueName:order-email-queue}") String emailQueueName,
                               @Value("${aws.sqs.smsQueueName:order-sms-queue}") String smsQueueName,
+                              @Value("${aws.sqs.shippingQueueName:order-shipping-queue}") String shippingQueueName,
                               @Value("${aws.region:us-east-1}") String region) {
         this.snsClient = snsClient;
         this.sqsClient = sqsClient;
@@ -65,6 +71,7 @@ public class MessagingResources {
         this.lambdaQueueName = lambdaQueueName;
         this.emailQueueName = emailQueueName;
         this.smsQueueName = smsQueueName;
+        this.shippingQueueName = shippingQueueName;
         this.region = region;
     }
 
@@ -76,12 +83,14 @@ public class MessagingResources {
             lambdaQueueUrl = ensureQueue(lambdaQueueName);
             emailQueueUrl = ensureQueue(emailQueueName);
             smsQueueUrl = ensureQueue(smsQueueName);
+            shippingQueueUrl = ensureQueue(shippingQueueName);
             subscribeQueue(topicArn, processorQueueUrl);
             subscribeQueue(topicArn, lambdaQueueUrl);
             subscribeQueue(topicArn, emailQueueUrl);
             subscribeQueue(topicArn, smsQueueUrl);
-            log.info("Messaging resources ready. topic={}, processorQueue={}, lambdaQueue={}, emailQueue={}, smsQueue={}",
-                    topicArn, processorQueueUrl, lambdaQueueUrl, emailQueueUrl, smsQueueUrl);
+            subscribeQueue(topicArn, shippingQueueUrl);
+            log.info("Messaging resources ready. topic={}, processorQueue={}, lambdaQueue={}, emailQueue={}, smsQueue={}, shippingQueue={}",
+                    topicArn, processorQueueUrl, lambdaQueueUrl, emailQueueUrl, smsQueueUrl, shippingQueueUrl);
         } catch (Exception e) {
             log.warn("Could not provision messaging resources (is LocalStack running?); "
                     + "messaging will be inactive until restart.", e);
@@ -137,5 +146,9 @@ public class MessagingResources {
 
     public String smsQueueUrl() {
         return smsQueueUrl;
+    }
+
+    public String shippingQueueUrl() {
+        return shippingQueueUrl;
     }
 }

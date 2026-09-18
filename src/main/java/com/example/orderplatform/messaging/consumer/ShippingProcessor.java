@@ -1,0 +1,91 @@
+package com.example.orderplatform.messaging.consumer;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.orderplatform.event.OrderCreatedEvent;
+import com.example.orderplatform.exception.OrderNotFoundException;
+import com.example.orderplatform.messaging.MessagingResources;
+import com.example.orderplatform.service.OrderService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
+
+import java.util.List;
+
+/**
+ * SQS consumer that drives the shipping workflow for an order.
+ * <p>
+ * It listens on the "order-shipping-queue" (fed by SNS) and, on receipt of an
+ * {@link OrderCreatedEvent}, marks the order as {@code SHIPPING} via the
+ * cache-aware {@link OrderService#updateStatus}.
+ * <p>
+ * This mirrors {@link OrderProcessor} (the {@code SQS → shipping workflow} branch
+ * of the messaging flow).
+ */
+@Component
+public class ShippingProcessor {
+
+    private static final Logger log = LoggerFactory.getLogger(ShippingProcessor.class);
+
+    private final SqsClient sqsClient;
+    private final ObjectMapper objectMapper;
+    private final OrderService orderService;
+    private final MessagingResources messagingResources;
+
+    public ShippingProcessor(SqsClient sqsClient,
+                             ObjectMapper objectMapper,
+                             OrderService orderService,
+                             MessagingResources messagingResources) {
+        this.sqsClient = sqsClient;
+        this.objectMapper = objectMapper;
+        this.orderService = orderService;
+        this.messagingResources = messagingResources;
+    }
+
+    @Scheduled(fixedDelayString = "${aws.sqs.pollIntervalMs:5000}")
+    public void poll() {
+        String queueUrl = messagingResources.shippingQueueUrl();
+        if (queueUrl == null) {
+            return;
+        }
+        List<Message> messages = sqsClient.receiveMessage(ReceiveMessageRequest.builder()
+                        .queueUrl(queueUrl)
+                        .maxNumberOfMessages(10)
+                        .waitTimeSeconds(5)
+                        .build())
+                .messages();
+        for (Message message : messages) {
+            process(message, queueUrl);
+        }
+    }
+
+    private void process(Message message, String queueUrl) {
+        try {
+            OrderCreatedEvent event = parseEvent(message.body());
+            try {
+                orderService.updateStatus(event.orderId(), "SHIPPING");
+                log.info("Order {} marked SHIPPING", event.orderId());
+            } catch (OrderNotFoundException e) {
+                log.warn("Order {} not found; skipping SHIPPING update", event.orderId());
+            }
+        } catch (Exception e) {
+            log.error("Failed to process shipping message {}", message.messageId(), e);
+        } finally {
+            sqsClient.deleteMessage(DeleteMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .receiptHandle(message.receiptHandle())
+                    .build());
+        }
+    }
+
+    private OrderCreatedEvent parseEvent(String body) throws Exception {
+        JsonNode root = objectMapper.readTree(body);
+        String payload = root.has("Message") ? root.get("Message").asText() : body;
+        return objectMapper.readValue(payload, OrderCreatedEvent.class);
+    }
+}

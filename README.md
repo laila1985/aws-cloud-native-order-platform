@@ -7,9 +7,11 @@ Architecture:
 ```
 Spring Boot
     ↓
-REST API
+REST API  (orders + customers)
     ↓
-DynamoDB
+DynamoDB  (Orders + Customers tables)
+    ↓
+SNS fan-out → SQS consumers (processor / lambda / email / sms / shipping)
 ```
 
 ## Asynchronous processing (Step 3)
@@ -18,20 +20,31 @@ After an order is created, the API publishes an event that fans out through
 AWS messaging:
 
 ```
-                    ┌── SQS ──► Order Processor  (marks order "PROCESSED" in DynamoDB)
+                    ┌── SQS ──► Order Processor   (marks order "PROCESSED")
                     │
-Order API ──► SNS ──┤
+                    ├── SQS ──► Lambda-like       (marks order "NOTIFIED")
+                    │
+Order API ──► SNS ──┼── SQS ──► Email handler    (SES confirmation email)
    (create)         │
-                    └── Lambda  (marks order "NOTIFIED")
+                    ├── SQS ──► SMS handler       (SNS text message)
+                    │
+                    └── SQS ──► Shipping processor (marks order "SHIPPING")
 ```
 
-- **SNS topic** (`order-events`) fans out to two subscribers.
+- **SNS topic** (`order-events`) fans out to **five** subscribers.
 - **SQS queue** (`order-processor-queue`) → the in-app `OrderProcessor`, an
   `@Scheduled` poller that marks the order `PROCESSED`.
 - **Lambda** — for local development this is emulated as a second SQS queue
   (`order-lambda-queue`) consumed by `OrderLambdaHandler` (marks the order
   `NOTIFIED`). In AWS, replace this with a real Lambda subscribed to the topic
   (`protocol = "lambda"`); the queue + poller then become unnecessary.
+- **Email** — `EmailNotificationHandler` consumes `order-email-queue`, looks up
+  the customer, and sends a confirmation email through **SES**.
+- **SMS** — `SmsNotificationHandler` consumes `order-sms-queue`, looks up the
+  customer, and sends a text message via **SNS** direct publish to the
+  customer's phone number.
+- **Shipping** — `ShippingProcessor` consumes `order-shipping-queue` and marks
+  the order `SHIPPING`.
 
 Publishing is **best-effort** and non-blocking: it never fails the order
 creation response, and the app still boots even if messaging resources are
@@ -39,11 +52,14 @@ unavailable.
 
 ### Local emulation (LocalStack)
 
-`docker-compose.yml` starts **LocalStack** (`sns` + `sqs` services) alongside
-DynamoDB Local. The app points at LocalStack via `aws.sns.endpoint` /
-`aws.sqs.endpoint` (default `http://localhost:4566`), the same pattern used for
-DynamoDB. Resources (topic, queues, subscriptions) are provisioned idempotently
-on startup.
+`docker-compose.yml` starts **LocalStack** (`sns` + `sqs` + `ses` services)
+alongside DynamoDB Local. The app points at LocalStack via `aws.sns.endpoint` /
+`aws.sqs.endpoint` / `aws.ses.endpoint` (default `http://localhost:4566`), the
+same pattern used for DynamoDB. Resources (topic, queues, subscriptions) are
+provisioned idempotently on startup.
+
+> LocalStack records SES/SNS calls but does not actually deliver real email or
+> SMS — that only happens against real AWS.
 
 ## Security (Step 4)
 
@@ -63,8 +79,9 @@ cache-aside pattern. See [`docs/GUIDE.md`](docs/GUIDE.md) — "Step 5".
 
 - Java 21
 - Spring Boot 3.3.x
-- AWS SDK v2 (DynamoDB Enhanced Client)
+- AWS SDK v2 (DynamoDB Enhanced Client, SNS, SQS, SES)
 - DynamoDB Local (via Docker) for development
+- LocalStack (SNS + SQS + SES) for local messaging emulation
 - Redis (cache-aside for reads; ElastiCache in AWS)
 
 ## Prerequisites
@@ -154,11 +171,17 @@ the browser.
 
 | Method | Endpoint              | Description            |
 |--------|-----------------------|------------------------|
+| POST   | `/api/customers`      | Create a customer      |
+| GET    | `/api/customers/{id}` | Get a customer by id   |
 | POST   | `/api/orders`         | Create an order        |
 | GET    | `/api/orders/{id}`    | Get an order by id     |
 | GET    | `/api/orders`         | List all orders        |
 | PUT    | `/api/orders/{id}`    | Update an order        |
 | DELETE | `/api/orders/{id}`    | Delete an order        |
+
+> An order must reference an existing customer: creating an order with a missing
+> or unknown `customerId` returns `404`. The order's `customerId` is immutable
+> after creation — attempts to change it return `400`.
 
 ### Example: create an order
 
@@ -180,7 +203,13 @@ Configuration is in `src/main/resources/application.yml`. Key properties:
 
 - `aws.region` — AWS region (default `us-east-1`)
 - `aws.dynamodb.endpoint` — DynamoDB endpoint; set to a local URL for local dev, empty for real AWS
-- `aws.dynamodb.tableName` — table name (default `Orders`)
+- `aws.dynamodb.tableName` — orders table name (default `Orders`)
+- `aws.dynamodb.customerTableName` — customers table name (default `Customers`)
+- `aws.sns.endpoint` / `aws.sqs.endpoint` / `aws.ses.endpoint` — messaging endpoints (LocalStack)
+- `aws.sns.topicName` — SNS topic name (default `order-events`)
+- `aws.sqs.processorQueueName` / `lambdaQueueName` / `emailQueueName` / `smsQueueName` / `shippingQueueName` — the five fan-out queues
+- `aws.ses.senderEmail` — "from" address for SES emails
+- `aws.currency` — currency used in order confirmation emails (default `AED`)
 - `aws.accessKeyId` / `aws.secretAccessKey` — static credentials (used only for local dev)
 
 When running in AWS, leave the endpoint and credentials empty and rely on the

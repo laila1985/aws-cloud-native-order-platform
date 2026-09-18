@@ -87,8 +87,11 @@ public class OrderService {
     @CachePut(cacheNames = ORDERS_CACHE, key = "#orderId")
     public Order update(String orderId, Order updated) {
         Order existing = findById(orderId);
+        // customerId is immutable after creation: reject any attempt to change it.
+        if (updated.getCustomerId() != null && !updated.getCustomerId().equals(existing.getCustomerId())) {
+            throw new IllegalArgumentException("customerId is immutable and cannot be changed");
+        }
         existing.setStatus(updated.getStatus() != null ? updated.getStatus() : existing.getStatus());
-        existing.setCustomerId(updated.getCustomerId() != null ? updated.getCustomerId() : existing.getCustomerId());
         if (updated.getItems() != null) {
             existing.setItems(updated.getItems());
             existing.setTotalAmount(computeTotal(existing));

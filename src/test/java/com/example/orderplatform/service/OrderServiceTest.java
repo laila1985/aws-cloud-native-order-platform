@@ -187,6 +187,42 @@ class OrderServiceTest {
     }
 
     @Test
+    @DisplayName("update() rejects changing customerId (immutable after creation)")
+    void update_rejectsCustomerIdChange() {
+        Order existing = new Order();
+        existing.setOrderId("id-1");
+        existing.setStatus("CREATED");
+        existing.setCustomerId("cust-old");
+        when(orderRepository.findById("id-1")).thenReturn(Optional.of(existing));
+
+        Order updated = new Order();
+        updated.setCustomerId("cust-new");
+
+        assertThatThrownBy(() -> orderService.update("id-1", updated))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("immutable");
+
+        verify(orderRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("update() accepts the same customerId (no change)")
+    void update_acceptsSameCustomerId() {
+        Order existing = new Order();
+        existing.setOrderId("id-1");
+        existing.setStatus("CREATED");
+        existing.setCustomerId("cust-old");
+        when(orderRepository.findById("id-1")).thenReturn(Optional.of(existing));
+
+        Order updated = new Order();
+        updated.setCustomerId("cust-old");
+
+        Order result = orderService.update("id-1", updated);
+
+        assertThat(result.getCustomerId()).isEqualTo("cust-old");
+    }
+
+    @Test
     @DisplayName("update() leaves total untouched when no items provided")
     void update_keepsTotalWhenNoItemsProvided() {
         Order existing = new Order();

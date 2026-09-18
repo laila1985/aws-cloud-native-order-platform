@@ -28,6 +28,7 @@ aws:
     lambdaQueueName: order-lambda-queue
     emailQueueName: order-email-queue
     smsQueueName: order-sms-queue
+    shippingQueueName: order-shipping-queue
     pollIntervalMs: 5000
   ses:
     endpoint: http://localhost:4566
