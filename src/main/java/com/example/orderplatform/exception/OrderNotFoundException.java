@@ -1,4 +1,4 @@
-package com.example.orderplatform.service;
+package com.example.orderplatform.exception;
 
 public class OrderNotFoundException extends RuntimeException {
 

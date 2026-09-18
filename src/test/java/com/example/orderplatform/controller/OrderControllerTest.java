@@ -1,7 +1,7 @@
 package com.example.orderplatform.controller;
 
 import com.example.orderplatform.model.Order;
-import com.example.orderplatform.service.OrderNotFoundException;
+import com.example.orderplatform.exception.OrderNotFoundException;
 import com.example.orderplatform.service.OrderService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;

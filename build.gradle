@@ -38,6 +38,9 @@ dependencies {
     implementation "software.amazon.awssdk:sns:${awsSdkVersion}"
     implementation "software.amazon.awssdk:sqs:${awsSdkVersion}"
 
+    // AWS SDK v2 for email (SES)
+    implementation "software.amazon.awssdk:ses:${awsSdkVersion}"
+
     // Redis caching (cache-aside for GET /orders/{id})
     implementation 'org.springframework.boot:spring-boot-starter-data-redis'
     implementation 'org.springframework.boot:spring-boot-starter-cache'

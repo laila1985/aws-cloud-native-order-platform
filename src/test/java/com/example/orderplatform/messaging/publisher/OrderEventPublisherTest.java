@@ -1,9 +1,10 @@
-package com.example.orderplatform.messaging;
+package com.example.orderplatform.messaging.publisher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.example.orderplatform.event.OrderCreatedEvent;
+import com.example.orderplatform.messaging.MessagingResources;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;

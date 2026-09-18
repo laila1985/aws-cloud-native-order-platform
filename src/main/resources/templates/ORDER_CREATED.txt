@@ -1,0 +1,7 @@
+Hi {{customerName}},
+
+Your order {{orderId}} has been confirmed.
+
+Total: {{totalAmount}} {{currency}}
+
+Thanks for your order!

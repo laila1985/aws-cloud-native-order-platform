@@ -1,6 +1,7 @@
-package com.example.orderplatform.messaging;
+package com.example.orderplatform.messaging.consumer;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.orderplatform.messaging.MessagingResources;
 import com.example.orderplatform.service.OrderService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;

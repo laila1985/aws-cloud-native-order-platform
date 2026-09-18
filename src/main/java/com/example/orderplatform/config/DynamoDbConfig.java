@@ -1,5 +1,6 @@
 package com.example.orderplatform.config;
 
+import com.example.orderplatform.model.Customer;
 import com.example.orderplatform.model.Order;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -35,6 +36,9 @@ public class DynamoDbConfig {
 
     @Value("${aws.dynamodb.tableName:Orders}")
     private String tableName;
+
+    @Value("${aws.dynamodb.customerTableName:Customers}")
+    private String customerTableName;
 
     @Value("${aws.accessKeyId:}")
     private String accessKeyId;
@@ -74,11 +78,18 @@ public class DynamoDbConfig {
         return table;
     }
 
+    @Bean
+    public DynamoDbTable<Customer> customerTable(DynamoDbEnhancedClient enhancedClient) {
+        DynamoDbTable<Customer> table = enhancedClient.table(customerTableName, TableSchema.fromBean(Customer.class));
+        ensureTableExists(table);
+        return table;
+    }
+
     /**
      * Creates the table if it does not already exist. This is convenient for
      * local development; in production use IaC (CloudFormation/Terraform).
      */
-    private void ensureTableExists(DynamoDbTable<Order> table) {
+    private void ensureTableExists(DynamoDbTable<?> table) {
         try {
             table.describeTable();
         } catch (ResourceNotFoundException e) {

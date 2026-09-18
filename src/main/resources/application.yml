@@ -18,6 +18,7 @@ aws:
   dynamodb:
     endpoint: http://localhost:8000
     tableName: Orders
+    customerTableName: Customers
   sns:
     endpoint: http://localhost:4566
     topicName: order-events
@@ -25,6 +26,12 @@ aws:
     endpoint: http://localhost:4566
     processorQueueName: order-processor-queue
     lambdaQueueName: order-lambda-queue
+    emailQueueName: order-email-queue
+    smsQueueName: order-sms-queue
     pollIntervalMs: 5000
+  ses:
+    endpoint: http://localhost:4566
+    senderEmail: no-reply@example.com
+  currency: AED
   accessKeyId: local
   secretAccessKey: local

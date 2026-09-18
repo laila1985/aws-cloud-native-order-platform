@@ -745,11 +745,13 @@ Now, when an order is created, we **announce** it and let other parts react in t
 background. The flow:
 
 ```
-                    ┌── SQS ──► Order Processor  → marks order "PROCESSED"
-                    │
-Order API ──► SNS ──┤
-                    │
-                    └── Lambda-like consumer     → marks order "NOTIFIED"
+                        ┌── SQS ──► Order Processor   → marks order "PROCESSED"
+                        │
+Order API ──► SNS ──────┼── SQS ──► Lambda-like      → marks order "NOTIFIED"
+   (create)             │
+                        ├── email  ──► plain-text email sent
+                        │
+                        └── SMS    ──► text message sent
 ```
 
 **The ideas, in one line each:**
@@ -757,6 +759,8 @@ Order API ──► SNS ──┤
 - **SNS** = a megaphone. Publish once, many subscribers get a copy ("fan-out").
 - **SQS** = a queue. Messages wait in line for a worker.
 - **Lambda** = a serverless function (emulated locally with a second queue).
+- **email** = SNS sends a plain-text email to an address (protocol `"email"`).
+- **sms** = SNS sends a text message to a phone number (protocol `"sms"`).
 
 ### 3a. The event — `OrderCreatedEvent.java`
 
@@ -820,22 +824,33 @@ public class MessagingResources {
             topicArn = ensureTopic();                        // (3)
             processorQueueUrl = ensureQueue(processorQueueName);
             lambdaQueueUrl = ensureQueue(lambdaQueueName);
-            subscribe(topicArn, processorQueueUrl);          // (4)
-            subscribe(topicArn, lambdaQueueUrl);
+            subscribeQueue(topicArn, processorQueueUrl);     // (4)
+            subscribeQueue(topicArn, lambdaQueueUrl);
+            subscribeEmail();                                // (5)
+            subscribeSms();                                  // (6)
         } catch (Exception e) {
-            log.warn("Could not provision messaging resources ...", e);  // (5)
+            log.warn("Could not provision messaging resources ...", e);
         }
     }
 
-    private String ensureTopic() {
-        return snsClient.createTopic(CreateTopicRequest.builder()
-                .name(topicName).build()).topicArn();        // (6)
+    private void subscribeQueue(String topicArn, String queueUrl) {
+        String queueArn = sqsClient.getQueueAttributes(...); // (7)
+        subscribe(topicArn, "sqs", queueArn);
     }
 
-    private void subscribe(String topicArn, String queueUrl) {
-        String queueArn = sqsClient.getQueueAttributes(...); // (7)
+    private void subscribeEmail() {
+        if (emailSubscriber == null || emailSubscriber.isBlank()) return;  // (8)
+        subscribe(topicArn, "email", emailSubscriber);
+    }
+
+    private void subscribeSms() {
+        if (smsSubscriber == null || smsSubscriber.isBlank()) return;      // (9)
+        subscribe(topicArn, "sms", smsSubscriber);
+    }
+
+    private void subscribe(String topicArn, String protocol, String endpoint) {
         snsClient.subscribe(SubscribeRequest.builder()
-                .topicArn(topicArn).protocol("sqs").endpoint(queueArn).build()); // (8)
+                .topicArn(topicArn).protocol(protocol).endpoint(endpoint).build()); // (10)
     }
 }
 ```
@@ -848,19 +863,24 @@ public class MessagingResources {
 3. **`ensureTopic`** — `createTopic` is *idempotent*: if the topic already exists,
    AWS/LocalStack returns the existing one. So "ensure" = "create if missing."
 
-4. **`subscribe`** — Wire the queue to the topic so messages fan out to it.
+4. **`subscribeQueue`** — Wire each SQS queue to the topic.
 
-5. **`try/catch` + warn** — *Resilience*. If LocalStack isn't running, the app
-   still starts; messaging is just inactive until restart. (The `topicArn`/
-   `queueUrl` fields stay `null`, and consumers skip polling — see 3e.)
-
-6. **`.topicArn()`** — ARN = Amazon Resource Name, a unique identifier like
-   `arn:aws:sns:us-east-1:123:order-events`.
+5–6. **`subscribeEmail` / `subscribeSms`** — optionally add email/SMS subscribers,
+   skipped when their config value is blank.
 
 7. SNS subscribes SQS by the *queue's ARN*, so we first look up the queue's ARN.
 
-8. **`protocol("sqs")`** — The subscription protocol. `"sqs"` = deliver to a queue.
-   (In real AWS, the Lambda branch would be `protocol("lambda")`.)
+8–9. **Email/SMS are blank-checked** — if `aws.sns.email`/`aws.sns.sms` is empty,
+   no subscription is created. This keeps them optional.
+
+10. **`subscribe(protocol, endpoint)`** — the generic helper. For `"sqs"` the
+    endpoint is the queue's **ARN**; for `"email"` it's a plain **address**; for
+    `"sms"` it's a phone number in **E.164** format (e.g. `+12065550100`).
+
+> **Email/SMS need confirmation in real AWS.** SNS sends a confirmation email /
+> SMS that the recipient must approve before messages flow. And note that
+> **LocalStack records these subscriptions but doesn't actually deliver email or
+> SMS** — so locally they're no-ops; they only become real when deployed to AWS.
 
 ### 3d. Publishing — `OrderEventPublisher.java`
 

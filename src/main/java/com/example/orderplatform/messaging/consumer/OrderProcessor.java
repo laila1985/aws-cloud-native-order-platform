@@ -1,9 +1,10 @@
-package com.example.orderplatform.messaging;
+package com.example.orderplatform.messaging.consumer;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.orderplatform.event.OrderCreatedEvent;
-import com.example.orderplatform.service.OrderNotFoundException;
+import com.example.orderplatform.exception.OrderNotFoundException;
+import com.example.orderplatform.messaging.MessagingResources;
 import com.example.orderplatform.service.OrderService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,32 +18,26 @@ import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 import java.util.List;
 
 /**
- * Stands in for a real AWS Lambda function that is subscribed to the SNS topic.
+ * SQS consumer that processes {@link OrderCreatedEvent}s from the
+ * "order-processor-queue". On receipt it marks the corresponding order as
+ * {@code PROCESSED} (via the cache-aware {@link OrderService#updateStatus}).
  * <p>
- * In AWS this branch is implemented as a Lambda (e.g. {@code order-notifier})
- * triggered by SNS; locally we emulate it as a second SQS queue
- * ({@code order-lambda-queue}) consumed by this handler. On receipt it marks the
- * order as {@code NOTIFIED} (via the cache-aware {@link OrderService#updateStatus}),
- * simulating the Lambda's side effect.
- * <p>
- * To replace this with a real Lambda, deploy the handler as a Lambda function
- * and add an SNS subscription with {@code protocol = "lambda"} — the SQS queue
- * and this poller then become unnecessary.
+ * This is the {@code SQS → Order Processor} branch of the messaging flow.
  */
 @Component
-public class OrderLambdaHandler {
+public class OrderProcessor {
 
-    private static final Logger log = LoggerFactory.getLogger(OrderLambdaHandler.class);
+    private static final Logger log = LoggerFactory.getLogger(OrderProcessor.class);
 
     private final SqsClient sqsClient;
     private final ObjectMapper objectMapper;
     private final OrderService orderService;
     private final MessagingResources messagingResources;
 
-    public OrderLambdaHandler(SqsClient sqsClient,
-                              ObjectMapper objectMapper,
-                              OrderService orderService,
-                              MessagingResources messagingResources) {
+    public OrderProcessor(SqsClient sqsClient,
+                          ObjectMapper objectMapper,
+                          OrderService orderService,
+                          MessagingResources messagingResources) {
         this.sqsClient = sqsClient;
         this.objectMapper = objectMapper;
         this.orderService = orderService;
@@ -51,7 +46,7 @@ public class OrderLambdaHandler {
 
     @Scheduled(fixedDelayString = "${aws.sqs.pollIntervalMs:5000}")
     public void poll() {
-        String queueUrl = messagingResources.lambdaQueueUrl();
+        String queueUrl = messagingResources.processorQueueUrl();
         if (queueUrl == null) {
             return;
         }
@@ -70,13 +65,13 @@ public class OrderLambdaHandler {
         try {
             OrderCreatedEvent event = parseEvent(message.body());
             try {
-                orderService.updateStatus(event.orderId(), "NOTIFIED");
-                log.info("[lambda-sim] Order {} marked NOTIFIED", event.orderId());
+                orderService.updateStatus(event.orderId(), "PROCESSED");
+                log.info("Order {} marked PROCESSED", event.orderId());
             } catch (OrderNotFoundException e) {
-                log.warn("[lambda-sim] Order {} not found; skipping NOTIFIED update", event.orderId());
+                log.warn("Order {} not found; skipping PROCESSED update", event.orderId());
             }
         } catch (Exception e) {
-            log.error("[lambda-sim] Failed to process message {}", message.messageId(), e);
+            log.error("Failed to process message {}", message.messageId(), e);
         } finally {
             sqsClient.deleteMessage(DeleteMessageRequest.builder()
                     .queueUrl(queueUrl)
@@ -85,6 +80,10 @@ public class OrderLambdaHandler {
         }
     }
 
+    /**
+     * SNS delivers to SQS by wrapping the payload in a notification envelope:
+     * the message body is JSON whose {@code "Message"} field holds our event.
+     */
     private OrderCreatedEvent parseEvent(String body) throws Exception {
         JsonNode root = objectMapper.readTree(body);
         String payload = root.has("Message") ? root.get("Message").asText() : body;

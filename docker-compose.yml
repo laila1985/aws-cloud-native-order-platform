@@ -13,7 +13,7 @@ services:
     image: localstack/localstack:latest
     container_name: localstack
     environment:
-      - SERVICES=sns,sqs
+      - SERVICES=sns,sqs,ses
       - DEBUG=0
     ports:
       - "4566:4566"

@@ -1,7 +1,8 @@
-package com.example.orderplatform.messaging;
+package com.example.orderplatform.messaging.publisher;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.orderplatform.event.OrderCreatedEvent;
+import com.example.orderplatform.messaging.MessagingResources;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;

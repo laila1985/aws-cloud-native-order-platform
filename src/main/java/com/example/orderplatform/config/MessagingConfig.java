@@ -1,4 +1,4 @@
-package com.example.orderplatform.messaging;
+package com.example.orderplatform.config;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -8,6 +8,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.ses.SesClient;
 
 import java.net.URI;
 
@@ -27,6 +28,9 @@ public class MessagingConfig {
 
     @Value("${aws.sqs.endpoint:}")
     private String sqsEndpoint;
+
+    @Value("${aws.ses.endpoint:}")
+    private String sesEndpoint;
 
     @Value("${aws.accessKeyId:}")
     private String accessKeyId;
@@ -52,6 +56,19 @@ public class MessagingConfig {
         var builder = SqsClient.builder().region(Region.of(region));
         if (sqsEndpoint != null && !sqsEndpoint.isBlank()) {
             builder.endpointOverride(URI.create(sqsEndpoint));
+        }
+        if (accessKeyId != null && !accessKeyId.isBlank()) {
+            builder.credentialsProvider(StaticCredentialsProvider.create(
+                    AwsBasicCredentials.create(accessKeyId, secretAccessKey)));
+        }
+        return builder.build();
+    }
+
+    @Bean
+    public SesClient sesClient() {
+        var builder = SesClient.builder().region(Region.of(region));
+        if (sesEndpoint != null && !sesEndpoint.isBlank()) {
+            builder.endpointOverride(URI.create(sesEndpoint));
         }
         if (accessKeyId != null && !accessKeyId.isBlank()) {
             builder.credentialsProvider(StaticCredentialsProvider.create(
